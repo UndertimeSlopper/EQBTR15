@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BTR15 PEQ Writer</title>
-<!-- single-file build of 0be619b -->
+<!-- single-file build of c0dcb78 -->
 <meta name="description" content="Write, read back and verify parametric EQ presets on a FiiO BTR15 over USB (WebHID), with auto-EQ fitting of AutoEQ files.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23256f6a'/%3E%3Cpath d='M4 20 C9 20 9 9 14 9 S19 23 24 23 S27 16 28 16' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
@@ -217,8 +217,8 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
   </div>
   <div class="conn">
     <span id="connStatus" class="chip">Not connected</span>
-    <button id="btnConnect" class="primary" title="Bluetooth serial link, as FiiO Control uses while the BTR15 plays audio">Connect BTR15</button>
-    <button id="btnConnectBle" title="Bluetooth Low Energy: FiiO Control's fallback route; Windows may need a separate pairing for it">Bluetooth LE</button>
+    <button id="btnConnect" class="primary" title="Bluetooth LE (GAIA): the route that reaches the BTR15 from Windows. Needs an LE pairing.">Connect BTR15</button>
+    <button id="btnConnectSerial" title="Classic Bluetooth serial link (GAIA over RFCOMM), as FiiO Control uses on Android. The BTR15 did not offer it to Windows in testing.">Bluetooth serial</button>
     <button id="btnConnectUsb" title="Experimental: no FiiO software answers on the BTR15's USB control interface yet">USB (experimental)</button>
     <button id="btnDemo" title="A simulated BTR15 inside the page, for trying things out">Demo device</button>
     <button id="btnDisconnect" hidden>Disconnect</button>
@@ -239,7 +239,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         <input type="checkbox" id="allowWrites"> <span>Allow writing to the device</span>
       </label>
     </div>
-    <div id="devEmpty" class="muted">Pair the BTR15 with Windows, close FiiO Control on your phone, then press <b>Connect BTR15</b> and pick its Bluetooth serial port. Connecting only reads. This is the same Bluetooth link FiiO Control uses; the BTR15's USB control interface does not answer.</div>
+    <div id="devEmpty" class="muted">Close FiiO Control on your phone, press <b>Connect BTR15</b> and pick the BTR15 in the Bluetooth list. Connecting only reads. The first time, the BTR15 has to be paired over Bluetooth LE: put it in pairing mode and accept the browser's or Windows' pairing prompt. (The BTR15's USB control interface does not answer, and Windows sees no serial service on it.)</div>
     <div id="devInfo" hidden>
       <dl class="facts">
         <div><dt>Model</dt><dd id="fModel">–</dd></div>
@@ -2480,9 +2480,20 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       this.stats.tx++;
       try {
         await this._rawWrite(bytes);
-      } catch (e) {
+      } catch (e0) {
+        let e = e0;
+        for (let i = 0; i < 8 && /in progress/i.test(`${e.message ?? e}`); i++) {
+          if (i === 0) this.log?.warn("Bluetooth says a connection or pairing is in progress; waiting for it (accept any pairing prompt from Windows or the browser)\u2026");
+          await sleep(1500);
+          try {
+            await this._rawWrite(bytes);
+            return;
+          } catch (e2) {
+            e = e2;
+          }
+        }
         const msg = `${e.message ?? e}`;
-        if (/authenticat|insufficient|encrypt|not paired|pairing/i.test(msg)) {
+        if (/authenticat|insufficient|encrypt|not paired|pairing|in progress/i.test(msg)) {
           this.authFailed = true;
           throw new LinkError(`Bluetooth write failed: ${msg}`, "auth");
         }
@@ -3385,7 +3396,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     $("btnReadLive").disabled = !connected || state.busy;
     if (state.conn?.btr.readsSlotsDirectly) $("btnReadSlots").disabled = !connected || state.busy || !!state.info?.noAnswer;
     $("btnConnect").hidden = connected;
-    $("btnConnectBle").hidden = connected;
+    $("btnConnectSerial").hidden = connected;
     $("btnConnectUsb").hidden = connected;
     $("btnDemo").hidden = connected;
     $("btnDisconnect").hidden = !connected;
@@ -3431,8 +3442,8 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     return `${c.sim ? "Demo: " : ""}${devName(c.device)}${c.transport === "bluetooth" ? "" : " (USB)"}`;
   }
   if (!("serial" in navigator) && !("bluetooth" in navigator)) $("noBt").hidden = false;
-  if (!("serial" in navigator)) $("btnConnect").disabled = true;
-  if (!("bluetooth" in navigator)) $("btnConnectBle").disabled = true;
+  if (!("serial" in navigator)) $("btnConnectSerial").disabled = true;
+  if (!("bluetooth" in navigator)) $("btnConnect").disabled = true;
   if (!("hid" in navigator)) {
     $("btnConnectUsb").disabled = true;
   } else {
@@ -3465,7 +3476,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     <li>To help me: open <b>Control Panel \u2192 Hardware and Sound \u2192 Devices and Printers</b>, right-click the BTR15, choose <b>Properties</b>, open the <b>Services</b> tab (or <b>Hardware</b> tab) and tell me what is listed.</li>
   </ol>`;
   var serialAttempts = 0;
-  $("btnConnect").onclick = async () => {
+  $("btnConnectSerial").onclick = async () => {
     let port;
     const ids = [GAIA_SPP_UUID, SPP_UUID];
     const opts = serialAttempts++ === 0 ? { filters: ids.map((id) => ({ bluetoothServiceClassId: id })), allowedBluetoothServiceClassIds: ids } : { allowedBluetoothServiceClassIds: ids };
@@ -3494,7 +3505,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     }
     await openGaia(new SppLink(port, { log, profile: BTR15_BT }), port);
   };
-  $("btnConnectBle").onclick = async () => {
+  $("btnConnect").onclick = async () => {
     let device;
     try {
       device = await navigator.bluetooth.requestDevice({
@@ -3651,14 +3662,14 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         setStatus("No answer from device", "bad");
         if (info.authFailed) {
           setStatus("Not paired", "bad");
-          await alertDlg("Pair the BTR15 with Windows first", `<p>The BTR15 accepted the Bluetooth connection but refused the first command with <b>"Authentication failed"</b>. It only takes commands from a device it is paired with. Your phone is; this computer is not (or not for this kind of connection). Nothing was written.</p>
+          await alertDlg("The BTR15 needs a Bluetooth LE pairing", `<p>The BTR15 accepted the connection but refused the first command (<b>${esc(info.errors?.[0] ?? "")}</b>). It only takes commands over an encrypted Bluetooth LE link, which needs an <b>LE pairing</b> with this computer. The usual Windows "Add device" pairing is for audio and is not enough. Nothing was written.</p>
           <ol>
-            <li>Close FiiO Control on the phone. If the BTR15 is already listed under Windows <b>Settings \u2192 Bluetooth &amp; devices</b>, choose <b>Remove device</b> for it.</li>
-            <li>Put the BTR15 in pairing mode (on FiiO BTR models usually: with it switched off, hold the power button until the light flashes red and blue; check the BTR15 manual if yours differs).</li>
-            <li>In Windows: <b>Settings \u2192 Bluetooth &amp; devices \u2192 Add device \u2192 Bluetooth</b>, choose the BTR15 and accept any prompt.</li>
-            <li>Back here, press <b>Disconnect</b> if shown, then <b>Connect BTR15</b> again.</li>
+            <li>Close FiiO Control on the phone.</li>
+            <li>In Windows <b>Settings \u2192 Bluetooth &amp; devices</b>, remove the BTR15 (<b>\u22EF \u2192 Remove device</b>), so no half-finished pairing is left.</li>
+            <li>Put the BTR15 in pairing mode: on FiiO BTR models usually, with it switched off, hold the power button until the light flashes red and blue. Check the BTR15 manual if yours differs.</li>
+            <li>Here, press <b>Disconnect</b> if shown, then <b>Connect BTR15</b>, and pick it. The browser will try to pair over LE when the page sends its first command: <b>accept any pairing prompt</b> from Windows or the browser.</li>
           </ol>
-          <p class="small">If Windows showed a pairing prompt while the page was connecting, accepting it and connecting again may be enough.</p>`);
+          <p class="small">Once paired over LE, later connections should not need pairing mode. You can pair it again in Windows for audio afterwards if you want.</p>`);
           return;
         }
         await alertDlg("The BTR15 did not answer", state.conn.link.transport === "bluetooth-serial" ? `<p>The serial port opened but nothing answered the version request. Nothing was written.</p><p>If you picked a "Standard Serial over Bluetooth link" port, disconnect and try the other one (the <b>outgoing</b> port). Otherwise press <b>Copy log</b> and paste it into the chat.</p>` : state.conn.transport === "bluetooth" ? `<p>The BTR15 accepted the Bluetooth connection but did not answer the version request. Nothing was written.</p><p>Please press <b>Copy log</b> and paste it into the chat. Closing FiiO Control on your phone may help.</p>` : `<p>The page asked for the band count in every encoding it knows and got no reply. Nothing was written.</p>

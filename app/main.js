@@ -92,7 +92,7 @@ function updateControls() {
   $('btnReadLive').disabled = !connected || state.busy;
   if (state.conn?.btr.readsSlotsDirectly) $('btnReadSlots').disabled = !connected || state.busy || !!state.info?.noAnswer;
   $('btnConnect').hidden = connected;
-  $('btnConnectBle').hidden = connected;
+  $('btnConnectSerial').hidden = connected;
   $('btnConnectUsb').hidden = connected;
   $('btnDemo').hidden = connected;
   $('btnDisconnect').hidden = !connected;
@@ -143,8 +143,8 @@ function connLabel() {
 
 // ── Connecting ──────────────────────────────────────────────────────────────
 if (!('serial' in navigator) && !('bluetooth' in navigator)) $('noBt').hidden = false;
-if (!('serial' in navigator)) $('btnConnect').disabled = true;
-if (!('bluetooth' in navigator)) $('btnConnectBle').disabled = true;
+if (!('serial' in navigator)) $('btnConnectSerial').disabled = true;
+if (!('bluetooth' in navigator)) $('btnConnect').disabled = true;
 if (!('hid' in navigator)) {
   $('btnConnectUsb').disabled = true;
 } else {
@@ -181,7 +181,7 @@ const SERIAL_HELP = `<p>The list should show the BTR15 (for example <b>FIIO BTR1
   </ol>`;
 
 let serialAttempts = 0;
-$('btnConnect').onclick = async () => {
+$('btnConnectSerial').onclick = async () => {
   let port;
   const ids = [GAIA_SPP_UUID, SPP_UUID];
   // First try: only Bluetooth devices offering GAIA or SPP. Later tries also
@@ -210,7 +210,7 @@ $('btnConnect').onclick = async () => {
 };
 
 // ── Bluetooth LE (FiiO's fallback route; needs an LE pairing on Windows) ────
-$('btnConnectBle').onclick = async () => {
+$('btnConnect').onclick = async () => {
   let device;
   try {
     device = await navigator.bluetooth.requestDevice({
@@ -355,14 +355,14 @@ async function identify(auto = false) {
       setStatus('No answer from device', 'bad');
       if (info.authFailed) {
         setStatus('Not paired', 'bad');
-        await alertDlg('Pair the BTR15 with Windows first', `<p>The BTR15 accepted the Bluetooth connection but refused the first command with <b>"Authentication failed"</b>. It only takes commands from a device it is paired with. Your phone is; this computer is not (or not for this kind of connection). Nothing was written.</p>
+        await alertDlg('The BTR15 needs a Bluetooth LE pairing', `<p>The BTR15 accepted the connection but refused the first command (<b>${esc(info.errors?.[0] ?? '')}</b>). It only takes commands over an encrypted Bluetooth LE link, which needs an <b>LE pairing</b> with this computer. The usual Windows "Add device" pairing is for audio and is not enough. Nothing was written.</p>
           <ol>
-            <li>Close FiiO Control on the phone. If the BTR15 is already listed under Windows <b>Settings → Bluetooth &amp; devices</b>, choose <b>Remove device</b> for it.</li>
-            <li>Put the BTR15 in pairing mode (on FiiO BTR models usually: with it switched off, hold the power button until the light flashes red and blue; check the BTR15 manual if yours differs).</li>
-            <li>In Windows: <b>Settings → Bluetooth &amp; devices → Add device → Bluetooth</b>, choose the BTR15 and accept any prompt.</li>
-            <li>Back here, press <b>Disconnect</b> if shown, then <b>Connect BTR15</b> again.</li>
+            <li>Close FiiO Control on the phone.</li>
+            <li>In Windows <b>Settings → Bluetooth &amp; devices</b>, remove the BTR15 (<b>⋯ → Remove device</b>), so no half-finished pairing is left.</li>
+            <li>Put the BTR15 in pairing mode: on FiiO BTR models usually, with it switched off, hold the power button until the light flashes red and blue. Check the BTR15 manual if yours differs.</li>
+            <li>Here, press <b>Disconnect</b> if shown, then <b>Connect BTR15</b>, and pick it. The browser will try to pair over LE when the page sends its first command: <b>accept any pairing prompt</b> from Windows or the browser.</li>
           </ol>
-          <p class="small">If Windows showed a pairing prompt while the page was connecting, accepting it and connecting again may be enough.</p>`);
+          <p class="small">Once paired over LE, later connections should not need pairing mode. You can pair it again in Windows for audio afterwards if you want.</p>`);
         return;
       }
       await alertDlg('The BTR15 did not answer', state.conn.link.transport === 'bluetooth-serial'

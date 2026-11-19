@@ -16,8 +16,8 @@
   </div>
   <div class="conn">
     <span id="connStatus" class="chip">Not connected</span>
-    <button id="btnConnect" class="primary" title="Bluetooth serial link, as FiiO Control uses while the BTR15 plays audio">Connect BTR15</button>
-    <button id="btnConnectBle" title="Bluetooth Low Energy: FiiO Control's fallback route; Windows may need a separate pairing for it">Bluetooth LE</button>
+    <button id="btnConnect" class="primary" title="Bluetooth LE (GAIA): the route that reaches the BTR15 from Windows. Needs an LE pairing.">Connect BTR15</button>
+    <button id="btnConnectSerial" title="Classic Bluetooth serial link (GAIA over RFCOMM), as FiiO Control uses on Android. The BTR15 did not offer it to Windows in testing.">Bluetooth serial</button>
     <button id="btnConnectUsb" title="Experimental: no FiiO software answers on the BTR15's USB control interface yet">USB (experimental)</button>
     <button id="btnDemo" title="A simulated BTR15 inside the page, for trying things out">Demo device</button>
     <button id="btnDisconnect" hidden>Disconnect</button>
@@ -38,7 +38,7 @@
         <input type="checkbox" id="allowWrites"> <span>Allow writing to the device</span>
       </label>
     </div>
-    <div id="devEmpty" class="muted">Pair the BTR15 with Windows, close FiiO Control on your phone, then press <b>Connect BTR15</b> and pick its Bluetooth serial port. Connecting only reads. This is the same Bluetooth link FiiO Control uses; the BTR15's USB control interface does not answer.</div>
+    <div id="devEmpty" class="muted">Close FiiO Control on your phone, press <b>Connect BTR15</b> and pick the BTR15 in the Bluetooth list. Connecting only reads. The first time, the BTR15 has to be paired over Bluetooth LE: put it in pairing mode and accept the browser's or Windows' pairing prompt. (The BTR15's USB control interface does not answer, and Windows sees no serial service on it.)</div>
     <div id="devInfo" hidden>
       <dl class="facts">
         <div><dt>Model</dt><dd id="fModel">–</dd></div>

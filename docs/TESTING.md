@@ -4,22 +4,24 @@ Run these in order in Chrome or Edge on Windows, with Bluetooth on. After each t
 press **Copy log** and paste it into the chat. Each test only relies on what the
 previous one confirmed.
 
-Before you start:
-
-* Pair the BTR15 with Windows (**Settings → Bluetooth & devices → Add device → Bluetooth**, with the BTR15 in pairing mode). If it was paired before and misbehaves, remove it and pair it again.
-* Close FiiO Control on your phone.
+Before you start, close FiiO Control on your phone.
 
 ## Test 1: read only (read commands only)
 
-1. Open the page and press **Connect BTR15**. Chrome/Edge lists serial ports. Pick the BTR15's Bluetooth serial port: it may be called **FIIO BTR15** or **Standard Serial over Bluetooth link (COM…)**. Windows usually creates two of the latter; the right one is the **outgoing** one. If the page gets no answer, connect again and pick the other one.
-   * If no such port is listed: **Settings → Bluetooth & devices → Devices → More Bluetooth settings → COM Ports → Add… → Outgoing**, pick the BTR15 and its **Serial Port** service. That tab also shows which COM number is outgoing.
-2. Leave **Allow writing to the device** unticked.
-3. Check the Device panel: firmware (should be 4.4), EQ switch, active preset, and the bands and global gain of the active preset if it is a user preset.
-4. Press **Read USER1–3**. This reads all three user presets without switching presets.
-5. Compare what the page shows with FiiO Control for one of the user presets.
-6. Copy the log.
+The BTR15 takes commands only over an encrypted Bluetooth LE link, so the first
+connection has to pair over LE:
 
-(**Bluetooth LE** is a second route, FiiO's fallback. On Windows it needs an LE pairing that the normal pairing may not create, and it failed that way in the first test.)
+1. In Windows **Settings → Bluetooth & devices**, remove the BTR15 if it is listed (**⋯ → Remove device**).
+2. Put the BTR15 in pairing mode. On FiiO BTR models this is usually: with it switched off, hold the power button until the light flashes red and blue.
+3. Open the page, press **Connect BTR15** and pick **FIIO BTR15** in the Bluetooth list. Leave **Allow writing to the device** unticked.
+4. When the page sends its first command, the browser tries to pair. **Accept any pairing prompt** from Windows or the browser. The page waits a few seconds for it.
+5. Check the Device panel: firmware (should be 4.4), EQ switch, active preset, and the bands of the active preset if it is a user preset.
+6. Press **Read USER1–3**. This reads all three user presets without switching presets.
+7. Compare what the page shows with FiiO Control for one of the user presets, then copy the log.
+
+On later connections the BTR15 should not need pairing mode.
+
+(**Bluetooth serial** is the classic route FiiO Control uses on Android. In testing, Windows reported that the BTR15 offers it no serial service.)
 
 ## Test 2: the first write
 

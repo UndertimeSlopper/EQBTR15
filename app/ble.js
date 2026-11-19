@@ -128,10 +128,20 @@ export class BleLink {
     this.stats.tx++;
     try {
       await this._rawWrite(bytes);
-    } catch (e) {
+    } catch (e0) {
+      let e = e0;
+      // The GAIA command characteristic needs an encrypted (paired) LE link.
+      // When it is missing, Chrome/Edge pair on demand; while that pairing is
+      // pending (or waiting for you to confirm it) writes fail with "already
+      // in progress". Wait for it rather than giving up at once.
+      for (let i = 0; i < 8 && /in progress/i.test(`${e.message ?? e}`); i++) {
+        if (i === 0) this.log?.warn('Bluetooth says a connection or pairing is in progress; waiting for it (accept any pairing prompt from Windows or the browser)…');
+        await sleep(1500);
+        try { await this._rawWrite(bytes); return; } catch (e2) { e = e2; }
+      }
       const msg = `${e.message ?? e}`;
       // The BTR15 refuses commands from a device it is not paired with.
-      if (/authenticat|insufficient|encrypt|not paired|pairing/i.test(msg)) {
+      if (/authenticat|insufficient|encrypt|not paired|pairing|in progress/i.test(msg)) {
         this.authFailed = true;
         throw new LinkError(`Bluetooth write failed: ${msg}`, 'auth');
       }

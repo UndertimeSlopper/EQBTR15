@@ -119,3 +119,20 @@ test('reconnects once after a dropped link and retries the command', async () =>
   assert.match(log.toText(), /reconnecting once/);
   await link.close();
 });
+
+test('waits through "in progress" while a pairing completes', async () => {
+  const dev = new SimulatedBtr15Ble();
+  const real = dev.cmdChar.writeValueWithResponse;
+  let n = 0;
+  dev.cmdChar.writeValueWithResponse = async (b) => {
+    if (n++ < 2) throw new DOMException('Connection already in progress.', 'NetworkError');
+    return real(b);
+  };
+  const log = new TrafficLog();
+  const link = new BleLink(dev, { log, timeoutMs: 200, profile: fast });
+  await link.open();
+  const info = await new Btr15Bt(link, { profile: fast, log }).identify();
+  assert.deepEqual(info.firmware, [4, 4], log.toText());
+  assert.match(log.toText(), /pairing is in progress/);
+  await link.close();
+});
