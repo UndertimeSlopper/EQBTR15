@@ -68,6 +68,7 @@ The FiiO command numbers and payloads are the same on both transports.
 * After fully restarting Edge, the first write still failed at once with "in progress". So the pending pairing is more likely at the Windows level.
 * With **Bluetooth devices discovery = Advanced** and "Show all", Windows' Add-device list shows a **second "FIIO BTR15" entry** (presumably the LE side). Pairing it from Windows failed with the generic "Try connecting your device again".
 * In parallel, the USB connection now ends with a read-only diagnostic: the GAIA version request (FiiO 0x0002) sent over the `FIIO BTR15 EQ` HID interface in each GAIA framing (BLE-style `00 0A 04`, v3 serial `FF 03 … 00 1D CC`, v1 serial `FF 01 … 00 0A 04`), with and without a leading `07`.
+* Result: **no non-empty report** for any GAIA framing either. So no protocol found in FiiO's software gets an answer on the BTR15's USB interface.
 
 ## USB HID (reference; not working on the BTR15)
 
