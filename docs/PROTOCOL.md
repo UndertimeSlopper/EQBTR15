@@ -105,3 +105,16 @@ devicePEQ reports two firmware effects on other FiiO models:
 2. **Shelves come out "steeper" than requested.** devicePEQ treats the shelf number as slope S. Their measured relation, S = 1/(1 + (1/Q² − 2)/(A + 1/A)), is exactly the cookbook conversion between Q and S. So the firmware is consistent with taking the number as cookbook **Q**, the same convention as AutoEQ. For AutoEQ or APO files this needs no correction.
 
 This app models both effects as options ("How the BTR15 shapes filters"). The listening check tests each on the BTR15 itself.
+
+## FiiO Control for Android (APK studied 2026-11-19)
+
+Decompiled with jadx for study only; nothing is copied.
+
+* The app lists the BTR15 (its device type **24**, the same number FiiO's web app uses) among its **Bluetooth** devices. Its USB device list (KA17, KA15, QX13, and others) does not include the BTR15, and none of its USB HID code is used for it. So no FiiO software found so far talks to the BTR15's `FIIO BTR15 EQ` USB interface. FiiO's web page also fails to connect to it (reported in both UAC modes, on firmware updated 2026-11-19).
+* Bluetooth control is Qualcomm **GAIA over BLE GATT**. The app knows Qualcomm's GAIA service UUIDs (`00001100/1101/1102-d102-11e1-9b23-00025b00a5a5`) and FiiO's own (`00001100/1101/1102-04a5-1000-1000-40ed981a04a5`, `00001200/1201/1202-…`). Which pair the BTR15 uses is not confirmed yet.
+* One frame variant: `00 0A 04` (vendor), a 16-bit command, then the payload.
+* BTR15 EQ commands:
+  * `0x0302`: read a band; payload `[preset index, band]`.
+  * `0x1302`: write a band; payload `[preset index, band, gain16 ×10, freq16, Q16 ×100, type]`. Big-endian, the same field encoding as the USB HID protocol.
+  * `0x030B`: custom preset names, for its 3 custom presets.
+* **The type byte is only sent when the BTR15 firmware is 2.5 or newer.** On older firmware the app writes bands without a type, so every band is a peak. This is a likely cause of the reports that shelves revert to peaks.
