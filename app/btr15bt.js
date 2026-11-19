@@ -103,10 +103,18 @@ export class Btr15Bt extends Btr15 {
     const tryRead = async (key, fn) => {
       try { info[key] = await fn(); } catch (e) { info[key] = null; info.errors = [...(info.errors ?? []), `${key}: ${e.message}`]; }
     };
-    await tryRead('firmware', () => this.readFirmware());
-    if (info.firmware === null && info.errors?.some((e) => /Timed out/.test(e))) {
+    let firstError = null;
+    try { info.firmware = await this.readFirmware(); } catch (e) { firstError = e; info.firmware = null; info.errors = [`firmware: ${e.message}`]; }
+    if (firstError) {
       info.noAnswer = true;
-      this.log?.error('The BTR15 did not answer the version request over Bluetooth. Nothing further was sent.');
+      if (firstError.code === 'auth') {
+        info.authFailed = true;
+        this.log?.error('The BTR15 refused the command: this computer is not paired with it for Bluetooth control. Nothing further was sent.');
+      } else if (firstError.code === 'timeout') {
+        this.log?.error('The BTR15 did not answer the version request over Bluetooth. Nothing further was sent.');
+      } else {
+        this.log?.error(`The first command failed (${firstError.message}). Nothing further was sent.`);
+      }
       return info;
     }
     await tryRead('battery', () => this.readBattery());

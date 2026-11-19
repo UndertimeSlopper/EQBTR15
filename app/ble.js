@@ -31,6 +31,13 @@ export class BleLink {
     const d = this.device;
     this.log?.info(`Connecting over Bluetooth to "${d.name ?? 'unnamed device'}" (id ${d.id ?? '?'})…`);
     d.addEventListener('gattserverdisconnected', this._onGone);
+    await this._attach();
+    this.closed = false;
+  }
+
+  // Connect GATT and find the GAIA characteristics (also used to reconnect).
+  async _attach() {
+    const d = this.device;
     this.server = await d.gatt.connect();
     let service;
     try {
@@ -44,7 +51,6 @@ export class BleLink {
     this.withResponse = !!p.write || !p.writeWithoutResponse;
     this.respChar.addEventListener('characteristicvaluechanged', this._onNotify);
     await this.respChar.startNotifications();
-    this.closed = false;
     this.log?.info(`Connected. GAIA command characteristic: ${p.write ? 'write' : ''}${p.writeWithoutResponse ? ' write-without-response' : ''}; replies by notification.`);
   }
 
@@ -59,6 +65,7 @@ export class BleLink {
   markDisconnected() { this._gone(); }
 
   _gone() {
+    if (this._reattaching) return; // a reconnect attempt is in progress
     if (this.closed && !this.waiters.length) return;
     this.closed = true;
     this.log?.warn('Bluetooth connection lost.');
@@ -104,29 +111,77 @@ export class BleLink {
     return run;
   }
 
+  async _rawWrite(bytes) {
+    if (this.withResponse && this.cmdChar.writeValueWithResponse) await this.cmdChar.writeValueWithResponse(bytes);
+    else if (this.cmdChar.writeValueWithoutResponse) await this.cmdChar.writeValueWithoutResponse(bytes);
+    else await this.cmdChar.writeValue(bytes);
+  }
+
   async _write(bytes, text) {
     if (this.closed) throw new LinkError('Not connected', 'closed');
     this.log?.tx(text, bytes);
     this.stats.tx++;
     try {
-      if (this.withResponse && this.cmdChar.writeValueWithResponse) await this.cmdChar.writeValueWithResponse(bytes);
-      else if (this.cmdChar.writeValueWithoutResponse) await this.cmdChar.writeValueWithoutResponse(bytes);
-      else await this.cmdChar.writeValue(bytes);
+      await this._rawWrite(bytes);
     } catch (e) {
-      throw new LinkError(`Bluetooth write failed: ${e.message ?? e}`, 'send');
+      const msg = `${e.message ?? e}`;
+      // The BTR15 refuses commands from a device it is not paired with.
+      if (/authenticat|insufficient|encrypt|not paired|pairing/i.test(msg)) {
+        this.authFailed = true;
+        throw new LinkError(`Bluetooth write failed: ${msg}`, 'auth');
+      }
+      // A dropped link: wait for the browser to settle, reconnect once, retry once.
+      if (/connection|disconnected|gatt/i.test(msg) && !this.closed) {
+        this.log?.warn(`Bluetooth write failed (${msg}); reconnecting once and retrying.`);
+        try {
+          await this._reattach();
+          await this._rawWrite(bytes);
+          return;
+        } catch (e2) {
+          const m2 = `${e2.message ?? e2}`;
+          if (/authenticat|insufficient|encrypt|not paired|pairing/i.test(m2)) { this.authFailed = true; throw new LinkError(`Bluetooth write failed: ${m2}`, 'auth'); }
+          throw new LinkError(`Bluetooth write failed after reconnecting: ${m2}`, 'send');
+        }
+      }
+      throw new LinkError(`Bluetooth write failed: ${msg}`, 'send');
     }
   }
 
+  async _reattach() {
+    this._reattaching = true;
+    try {
+      for (let i = 0; i < 6 && !this.device.gatt.connected; i++) {
+        await sleep(500);
+        try { await this._attach(); } catch (e) { if (i === 5) throw e; }
+      }
+      if (!this.device.gatt.connected) await this._attach();
+    } finally {
+      this._reattaching = false;
+    }
+  }
+
+  // Registers for a reply right away (it can arrive before the write call
+  // returns); the timeout only starts once start() is called after the write.
   _wait(match, timeoutMs) {
-    return new Promise((resolve, reject) => {
-      const w = { match, resolve, reject };
+    let w;
+    const promise = new Promise((resolve, reject) => {
+      w = { match, resolve, reject };
+      this.waiters.push(w);
+    });
+    promise.start = () => {
+      if (!this.waiters.includes(w)) return;
       w.timer = setTimeout(() => {
         const i = this.waiters.indexOf(w);
         if (i >= 0) this.waiters.splice(i, 1);
-        reject(new LinkError('Timed out waiting for reply', 'timeout'));
+        w.reject(new LinkError('Timed out waiting for reply', 'timeout'));
       }, timeoutMs);
-      this.waiters.push(w);
-    });
+    };
+    promise.cancel = () => {
+      const i = this.waiters.indexOf(w);
+      if (i >= 0) this.waiters.splice(i, 1);
+      clearTimeout(w.timer);
+    };
+    return promise;
   }
 
   // Read with reply. `match(data)` narrows which reply counts.
@@ -139,14 +194,16 @@ export class BleLink {
         const wait = this._wait((r) => r.cmd === cmd && (r.status !== 0 || !match || match(r.data)), timeoutMs);
         try {
           await this._write(bytes, this._describe(f) + (attempt ? ` (retry ${attempt})` : ''));
+          wait.start();
           const r = await wait;
           if (r.status !== 0) throw new LinkError(`The device answered ${this._describe(f)} with status 0x${r.status.toString(16).padStart(2, '0')}`, 'status');
           return r;
         } catch (e) {
+          wait.cancel();
           wait.catch(() => {});
           last = e;
           if (e.code === 'timeout') { this.stats.timeouts++; this.log?.warn(`No reply to ${this._describe(f)} within ${timeoutMs} ms`); continue; }
-          throw e;
+          throw e; // auth, send and status errors are not retried here
         }
       }
       throw last;
@@ -164,9 +221,11 @@ export class BleLink {
       try {
         await this._write(bytes, this._describe(f));
       } catch (e) {
+        wait.cancel();
         wait.catch(() => {});
         throw e;
       }
+      wait.start();
       let r = null;
       try { r = await wait; } catch { this.log?.info(`(no acknowledgement for ${this._describe(f)} within ${listenMs} ms)`); }
       if (r && r.status !== 0) throw new LinkError(`The device refused ${this._describe(f)} with status 0x${r.status.toString(16).padStart(2, '0')}`, 'status');

@@ -89,3 +89,33 @@ test('lost notifications are retried', async () => {
   assert.ok(link.stats.timeouts > 0);
   await link.close();
 });
+
+test('stops at the first authentication error and says so', async () => {
+  const dev = new SimulatedBtr15Ble();
+  dev.cmdChar.writeValueWithResponse = async () => { throw new DOMException('Authentication failed.', 'NetworkError'); };
+  const log = new TrafficLog();
+  const link = new BleLink(dev, { log, timeoutMs: 100, profile: fast });
+  await link.open();
+  const info = await new Btr15Bt(link, { profile: fast, log }).identify();
+  assert.equal(info.authFailed, true);
+  assert.equal(link.stats.tx, 1, 'nothing more is sent after the refusal');
+  assert.match(log.toText(), /not paired/);
+  await link.close();
+});
+
+test('reconnects once after a dropped link and retries the command', async () => {
+  const dev = new SimulatedBtr15Ble();
+  const real = dev.cmdChar.writeValueWithResponse;
+  let failed = false;
+  dev.cmdChar.writeValueWithResponse = async (b) => {
+    if (!failed) { failed = true; dev.connected = false; throw new DOMException('Connection Error: Connection attempt failed.', 'NetworkError'); }
+    return real(b);
+  };
+  const log = new TrafficLog();
+  const link = new BleLink(dev, { log, timeoutMs: 200, profile: fast });
+  await link.open();
+  const info = await new Btr15Bt(link, { profile: fast, log }).identify();
+  assert.deepEqual(info.firmware, [4, 4], log.toText());
+  assert.match(log.toText(), /reconnecting once/);
+  await link.close();
+});

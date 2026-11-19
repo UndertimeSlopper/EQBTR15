@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BTR15 PEQ Writer</title>
-<!-- single-file build of 0abfc90 -->
+<!-- single-file build of 444c26b -->
 <meta name="description" content="Write, read back and verify parametric EQ presets on a FiiO BTR15 over USB (WebHID), with auto-EQ fitting of AutoEQ files.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23256f6a'/%3E%3Cpath d='M4 20 C9 20 9 9 14 9 S19 23 24 23 S27 16 28 16' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
@@ -2281,6 +2281,12 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       const d = this.device;
       this.log?.info(`Connecting over Bluetooth to "${d.name ?? "unnamed device"}" (id ${d.id ?? "?"})\u2026`);
       d.addEventListener("gattserverdisconnected", this._onGone);
+      await this._attach();
+      this.closed = false;
+    }
+    // Connect GATT and find the GAIA characteristics (also used to reconnect).
+    async _attach() {
+      const d = this.device;
       this.server = await d.gatt.connect();
       let service;
       try {
@@ -2294,7 +2300,6 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       this.withResponse = !!p.write || !p.writeWithoutResponse;
       this.respChar.addEventListener("characteristicvaluechanged", this._onNotify);
       await this.respChar.startNotifications();
-      this.closed = false;
       this.log?.info(`Connected. GAIA command characteristic: ${p.write ? "write" : ""}${p.writeWithoutResponse ? " write-without-response" : ""}; replies by notification.`);
     }
     async close() {
@@ -2314,6 +2319,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       this._gone();
     }
     _gone() {
+      if (this._reattaching) return;
       if (this.closed && !this.waiters.length) return;
       this.closed = true;
       this.log?.warn("Bluetooth connection lost.");
@@ -2366,28 +2372,79 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       this.queue = run.then(() => sleep(this.gapMs), () => sleep(this.gapMs));
       return run;
     }
+    async _rawWrite(bytes) {
+      if (this.withResponse && this.cmdChar.writeValueWithResponse) await this.cmdChar.writeValueWithResponse(bytes);
+      else if (this.cmdChar.writeValueWithoutResponse) await this.cmdChar.writeValueWithoutResponse(bytes);
+      else await this.cmdChar.writeValue(bytes);
+    }
     async _write(bytes, text) {
       if (this.closed) throw new LinkError("Not connected", "closed");
       this.log?.tx(text, bytes);
       this.stats.tx++;
       try {
-        if (this.withResponse && this.cmdChar.writeValueWithResponse) await this.cmdChar.writeValueWithResponse(bytes);
-        else if (this.cmdChar.writeValueWithoutResponse) await this.cmdChar.writeValueWithoutResponse(bytes);
-        else await this.cmdChar.writeValue(bytes);
+        await this._rawWrite(bytes);
       } catch (e) {
-        throw new LinkError(`Bluetooth write failed: ${e.message ?? e}`, "send");
+        const msg = `${e.message ?? e}`;
+        if (/authenticat|insufficient|encrypt|not paired|pairing/i.test(msg)) {
+          this.authFailed = true;
+          throw new LinkError(`Bluetooth write failed: ${msg}`, "auth");
+        }
+        if (/connection|disconnected|gatt/i.test(msg) && !this.closed) {
+          this.log?.warn(`Bluetooth write failed (${msg}); reconnecting once and retrying.`);
+          try {
+            await this._reattach();
+            await this._rawWrite(bytes);
+            return;
+          } catch (e2) {
+            const m2 = `${e2.message ?? e2}`;
+            if (/authenticat|insufficient|encrypt|not paired|pairing/i.test(m2)) {
+              this.authFailed = true;
+              throw new LinkError(`Bluetooth write failed: ${m2}`, "auth");
+            }
+            throw new LinkError(`Bluetooth write failed after reconnecting: ${m2}`, "send");
+          }
+        }
+        throw new LinkError(`Bluetooth write failed: ${msg}`, "send");
       }
     }
+    async _reattach() {
+      this._reattaching = true;
+      try {
+        for (let i = 0; i < 6 && !this.device.gatt.connected; i++) {
+          await sleep(500);
+          try {
+            await this._attach();
+          } catch (e) {
+            if (i === 5) throw e;
+          }
+        }
+        if (!this.device.gatt.connected) await this._attach();
+      } finally {
+        this._reattaching = false;
+      }
+    }
+    // Registers for a reply right away (it can arrive before the write call
+    // returns); the timeout only starts once start() is called after the write.
     _wait(match, timeoutMs) {
-      return new Promise((resolve, reject) => {
-        const w = { match, resolve, reject };
+      let w;
+      const promise = new Promise((resolve, reject) => {
+        w = { match, resolve, reject };
+        this.waiters.push(w);
+      });
+      promise.start = () => {
+        if (!this.waiters.includes(w)) return;
         w.timer = setTimeout(() => {
           const i = this.waiters.indexOf(w);
           if (i >= 0) this.waiters.splice(i, 1);
-          reject(new LinkError("Timed out waiting for reply", "timeout"));
+          w.reject(new LinkError("Timed out waiting for reply", "timeout"));
         }, timeoutMs);
-        this.waiters.push(w);
-      });
+      };
+      promise.cancel = () => {
+        const i = this.waiters.indexOf(w);
+        if (i >= 0) this.waiters.splice(i, 1);
+        clearTimeout(w.timer);
+      };
+      return promise;
     }
     // Read with reply. `match(data)` narrows which reply counts.
     get(cmd, data = [], { match, timeoutMs = this.timeoutMs, retries = this.retries } = {}) {
@@ -2399,10 +2456,12 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
           const wait2 = this._wait((r) => r.cmd === cmd && (r.status !== 0 || !match || match(r.data)), timeoutMs);
           try {
             await this._write(bytes, this._describe(f) + (attempt ? ` (retry ${attempt})` : ""));
+            wait2.start();
             const r = await wait2;
             if (r.status !== 0) throw new LinkError(`The device answered ${this._describe(f)} with status 0x${r.status.toString(16).padStart(2, "0")}`, "status");
             return r;
           } catch (e) {
+            wait2.cancel();
             wait2.catch(() => {
             });
             last = e;
@@ -2428,10 +2487,12 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         try {
           await this._write(bytes, this._describe(f));
         } catch (e) {
+          wait2.cancel();
           wait2.catch(() => {
           });
           throw e;
         }
+        wait2.start();
         let r = null;
         try {
           r = await wait2;
@@ -2544,10 +2605,24 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
           info.errors = [...info.errors ?? [], `${key}: ${e.message}`];
         }
       };
-      await tryRead("firmware", () => this.readFirmware());
-      if (info.firmware === null && info.errors?.some((e) => /Timed out/.test(e))) {
+      let firstError = null;
+      try {
+        info.firmware = await this.readFirmware();
+      } catch (e) {
+        firstError = e;
+        info.firmware = null;
+        info.errors = [`firmware: ${e.message}`];
+      }
+      if (firstError) {
         info.noAnswer = true;
-        this.log?.error("The BTR15 did not answer the version request over Bluetooth. Nothing further was sent.");
+        if (firstError.code === "auth") {
+          info.authFailed = true;
+          this.log?.error("The BTR15 refused the command: this computer is not paired with it for Bluetooth control. Nothing further was sent.");
+        } else if (firstError.code === "timeout") {
+          this.log?.error("The BTR15 did not answer the version request over Bluetooth. Nothing further was sent.");
+        } else {
+          this.log?.error(`The first command failed (${firstError.message}). Nothing further was sent.`);
+        }
         return info;
       }
       await tryRead("battery", () => this.readBattery());
@@ -3345,6 +3420,18 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       state.info = info;
       if (info.noAnswer) {
         setStatus("No answer from device", "bad");
+        if (info.authFailed) {
+          setStatus("Not paired", "bad");
+          await alertDlg("Pair the BTR15 with Windows first", `<p>The BTR15 accepted the Bluetooth connection but refused the first command with <b>"Authentication failed"</b>. It only takes commands from a device it is paired with. Your phone is; this computer is not (or not for this kind of connection). Nothing was written.</p>
+          <ol>
+            <li>Close FiiO Control on the phone. If the BTR15 is already listed under Windows <b>Settings \u2192 Bluetooth &amp; devices</b>, choose <b>Remove device</b> for it.</li>
+            <li>Put the BTR15 in pairing mode (on FiiO BTR models usually: with it switched off, hold the power button until the light flashes red and blue; check the BTR15 manual if yours differs).</li>
+            <li>In Windows: <b>Settings \u2192 Bluetooth &amp; devices \u2192 Add device \u2192 Bluetooth</b>, choose the BTR15 and accept any prompt.</li>
+            <li>Back here, press <b>Disconnect</b> if shown, then <b>Connect BTR15</b> again.</li>
+          </ol>
+          <p class="small">If Windows showed a pairing prompt while the page was connecting, accepting it and connecting again may be enough.</p>`);
+          return;
+        }
         await alertDlg("The BTR15 did not answer", state.conn.transport === "bluetooth" ? `<p>The BTR15 accepted the Bluetooth connection but did not answer the version request. Nothing was written.</p><p>Please press <b>Copy log</b> and paste it into the chat. Closing FiiO Control on your phone may help.</p>` : `<p>The page asked for the band count in every encoding it knows and got no reply. Nothing was written.</p>
         <p>Please press <b>Copy log</b> and paste it into the chat. Also check that FiiO Control and fiiocontrol.fiio.com are closed, then try unplugging and reconnecting.</p>`);
         return;

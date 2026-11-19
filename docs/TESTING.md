@@ -8,6 +8,11 @@ Before you start, close FiiO Control on your phone. Its Bluetooth control connec
 can keep the BTR15 busy. If the BTR15 still won't connect, turn the phone's
 Bluetooth off for a moment.
 
+The BTR15 only accepts commands from a device it is paired with. If the page reports
+"Authentication failed", pair the BTR15 with Windows first: put it in pairing mode,
+then use Settings → Bluetooth & devices → Add device → Bluetooth. If it is already
+listed there, remove it and pair it again.
+
 ## Test 1: read only (read commands only)
 
 1. Open the page and press **Connect BTR15**. Pick the BTR15 in the Bluetooth list.

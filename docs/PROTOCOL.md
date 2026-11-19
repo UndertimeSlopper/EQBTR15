@@ -40,6 +40,11 @@ FiiO code is copied.
 * There is no separate save command: FiiO's app writes bands straight into the preset.
 * Firmware below 2.5 is sent no type byte, so every band is a peak there. The tested BTR15 reports 4.4.
 
+### Observed on a real BTR15 over Bluetooth (Windows, Edge 157, 2026-11-19)
+
+* Web Bluetooth works from a local `file://` page. The BTR15 advertises as **`FIIO BTR15`**, accepts a GATT connection and has the GAIA service and characteristics. The command characteristic supports write with response.
+* The first command written was refused with **"Authentication failed"** while the PC was not paired with the BTR15: the GAIA characteristics require a paired (encrypted) link. After that the link dropped and Chrome reported "Connection already in progress" for further writes. The page now stops at the first refusal and explains how to pair.
+
 ## USB HID (reference; not working on the BTR15)
 
 ### Sources

@@ -312,6 +312,18 @@ async function identify(auto = false) {
     state.info = info;
     if (info.noAnswer) {
       setStatus('No answer from device', 'bad');
+      if (info.authFailed) {
+        setStatus('Not paired', 'bad');
+        await alertDlg('Pair the BTR15 with Windows first', `<p>The BTR15 accepted the Bluetooth connection but refused the first command with <b>"Authentication failed"</b>. It only takes commands from a device it is paired with. Your phone is; this computer is not (or not for this kind of connection). Nothing was written.</p>
+          <ol>
+            <li>Close FiiO Control on the phone. If the BTR15 is already listed under Windows <b>Settings → Bluetooth &amp; devices</b>, choose <b>Remove device</b> for it.</li>
+            <li>Put the BTR15 in pairing mode (on FiiO BTR models usually: with it switched off, hold the power button until the light flashes red and blue; check the BTR15 manual if yours differs).</li>
+            <li>In Windows: <b>Settings → Bluetooth &amp; devices → Add device → Bluetooth</b>, choose the BTR15 and accept any prompt.</li>
+            <li>Back here, press <b>Disconnect</b> if shown, then <b>Connect BTR15</b> again.</li>
+          </ol>
+          <p class="small">If Windows showed a pairing prompt while the page was connecting, accepting it and connecting again may be enough.</p>`);
+        return;
+      }
       await alertDlg('The BTR15 did not answer', state.conn.transport === 'bluetooth'
         ? `<p>The BTR15 accepted the Bluetooth connection but did not answer the version request. Nothing was written.</p><p>Please press <b>Copy log</b> and paste it into the chat. Closing FiiO Control on your phone may help.</p>`
         : `<p>The page asked for the band count in every encoding it knows and got no reply. Nothing was written.</p>
