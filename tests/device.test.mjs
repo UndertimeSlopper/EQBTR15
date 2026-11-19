@@ -81,3 +81,38 @@ test('refuses to write a built-in preset or out-of-range values', async () => {
   await assert.rejects(btr.writeSlot(7, { globalGain: 0, bands: bad }), /outside/);
   await link.close();
 });
+
+test('a stream of all-zero reports is summarised, not logged one by one', async () => {
+  const { btr, link, log } = await connect({ emptyEveryMs: 1 });
+  const info = await btr.identify();
+  assert.equal(info.framing, 'current');
+  assert.equal(info.bands.length, 10);
+  await link.close();
+  const zeroLines = log.toText().split('\n').filter((l) => /00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00/.test(l));
+  assert.equal(zeroLines.length, 0, 'no raw zero reports in the log');
+  assert.ok(link.stats.empty > 20, `empty reports counted (${link.stats.empty})`);
+  assert.match(log.toText(), /Ignored \d+ all-zero reports/);
+});
+
+test('falls back to the older frame format when the device wants it', async () => {
+  const { btr, dev, link } = await connect({ legacyOnly: true });
+  const info = await btr.identify();
+  assert.equal(info.framing, 'legacy');
+  assert.equal(info.bandCount, 10);
+  assert.deepEqual(info.firmware, [1, 0, 2]);
+  const sent = dev.received.at(-1);
+  assert.equal(sent.seq, 0); assert.equal(sent.crc, 0);
+  await link.close();
+});
+
+test('reports no answer and stops when the device never replies', async () => {
+  const dev = new SimulatedBtr15();
+  dev.sendReport = async () => {};
+  const log = new TrafficLog();
+  const link = new FiioLink(dev, { reportId: 7, log, timeoutMs: 30, profile: fast });
+  await link.open();
+  const info = await new Btr15(link, { profile: fast, log }).identify();
+  assert.equal(info.noAnswer, true);
+  assert.equal(link.stats.tx, 6, 'three tries in each of two frame formats, then nothing more');
+  await link.close();
+});

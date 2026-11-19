@@ -16,6 +16,8 @@ export class SimulatedBtr15 extends EventTarget {
       dropReplyEvery: 0,          // drop every Nth reply
       latencyMs: 4,
       echoSeq: true,
+      emptyEveryMs: 0,            // send an all-zero report this often, like a device answering every USB poll
+      legacyOnly: false,          // only answer frames with sequence 00 00 and checksum 00; zeros otherwise
       ...options,
     };
     this.productName = 'FIIO BTR15 (simulated)';
@@ -48,8 +50,23 @@ export class SimulatedBtr15 extends EventTarget {
     this.received = [];
   }
 
-  async open() { this.opened = true; }
-  async close() { this.opened = false; }
+  async open() {
+    this.opened = true;
+    if (this.options.emptyEveryMs) this._emptyTimer = setInterval(() => this._emit(new Uint8Array(32)), this.options.emptyEveryMs);
+  }
+  async close() { this.opened = false; clearInterval(this._emptyTimer); }
+
+  _emit(report) {
+    setTimeout(() => {
+      if (!this.opened) return;
+      const ev = new Event('inputreport');
+      ev.data = new DataView(report.buffer);
+      ev.reportId = 7;
+      ev.device = this;
+      this.dispatchEvent(ev);
+      this.oninputreport?.(ev);
+    }, this.options.latencyMs);
+  }
 
   async sendReport(reportId, data) {
     if (!this.opened) throw new Error('Device not open');
@@ -58,6 +75,7 @@ export class SimulatedBtr15 extends EventTarget {
     const f = decodeFrame(bytes);
     this.received.push(f);
     if (!f.valid) return;
+    if (this.options.legacyOnly && (f.seq !== 0 || f.crc !== 0)) { this._emit(new Uint8Array(32)); return; }
     const p = f.payload;
     if (f.kind === 'get') {
       switch (f.cmd) {
@@ -107,14 +125,7 @@ export class SimulatedBtr15 extends EventTarget {
     const frame = [...body, crc8(body), 0xEE];
     const report = new Uint8Array(63);
     report.set(frame);
-    setTimeout(() => {
-      const ev = new Event('inputreport');
-      ev.data = new DataView(report.buffer);
-      ev.reportId = 7;
-      ev.device = this;
-      this.dispatchEvent(ev);
-      this.oninputreport?.(ev);
-    }, this.options.latencyMs);
+    this._emit(report);
   }
 }
 

@@ -57,16 +57,45 @@ export class Btr15 {
     return bands;
   }
 
+  // Find a frame format the device answers, using a harmless GET. FiiO's
+  // current app sends a sequence number and CRC; its older app and devicePEQ
+  // send zeros there. Both are tried, current first.
+  async probe() {
+    for (const framing of ['current', 'legacy']) {
+      this.link.framing = framing;
+      this.log?.info(framing === 'current'
+        ? "Probing with FiiO's current frame format (sequence number and CRC): GET PEQ_COUNT"
+        : 'No answer. Probing with the older frame format (sequence 00 00, checksum 00): GET PEQ_COUNT');
+      try {
+        const n = await this.readBandCount();
+        this.log?.info(`The device answers the ${framing} frame format; using it from now on.`);
+        return { framing, bandCount: n };
+      } catch (e) {
+        if (e.code !== 'timeout') throw e;
+      }
+    }
+    this.link.framing = 'current';
+    return null;
+  }
+
   // Everything readable without changing anything.
   async identify() {
     const info = {};
     const tryRead = async (key, fn) => {
       try { info[key] = await fn(); } catch (e) { info[key] = null; info.errors = [...(info.errors ?? []), `${key}: ${e.message}`]; }
     };
+    let p = null;
+    try { p = await this.probe(); } catch (e) { info.errors = [`probe: ${e.message}`]; }
+    if (!p) {
+      info.noAnswer = true;
+      this.log?.error('The device did not answer GET PEQ_COUNT in either frame format. Nothing further was sent.');
+      return info;
+    }
+    info.framing = p.framing;
+    info.bandCount = p.bandCount;
     await tryRead('firmware', () => this.readFirmware());
     await tryRead('eqSwitch', () => this.readEqSwitch());
     await tryRead('preset', () => this.readPreset());
-    await tryRead('bandCount', () => this.readBandCount());
     await tryRead('globalGain', () => this.readGlobalGain());
     if (info.bandCount) await tryRead('bands', () => this.readBands(info.bandCount));
     return info;

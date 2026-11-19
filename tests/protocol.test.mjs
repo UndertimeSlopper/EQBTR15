@@ -48,3 +48,8 @@ test('decoding tolerates zero padding and flags a bad CRC', () => {
   const bad = decodeFrame(bytes);
   assert.ok(bad.valid && !bad.crcOk);
 });
+
+test('legacy framing sends zero sequence and checksum', () => {
+  const f = encodeFrame('get', CMD.PEQ_COUNT, [], 0x1234, { legacy: true });
+  assert.deepEqual(Array.from(f), [0xBB, 0x0B, 0, 0, 0x18, 0, 0, 0xEE]);
+});

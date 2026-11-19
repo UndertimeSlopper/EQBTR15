@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BTR15 PEQ Writer</title>
-<!-- single-file build of dev -->
+<!-- single-file build of 8be7961 -->
 <meta name="description" content="Write, read back and verify parametric EQ presets on a FiiO BTR15 over USB (WebHID), with auto-EQ fitting of AutoEQ files.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23256f6a'/%3E%3Cpath d='M4 20 C9 20 9 9 14 9 S19 23 24 23 S27 16 28 16' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
@@ -246,6 +246,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         <div><dt>Active preset</dt><dd id="fPreset">–</dd></div>
         <div><dt>Bands</dt><dd id="fBands">–</dd></div>
         <div><dt>Global gain</dt><dd id="fGain">–</dd></div>
+        <div><dt>Frame format</dt><dd id="fFraming">–</dd></div>
       </dl>
       <div id="devWarn" class="banner warn" hidden></div>
       <div class="row wrap">
@@ -1274,7 +1275,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     for (let i = 0; i < end; i++) c = CRC_TABLE[(c ^ bytes[i]) & 255];
     return c;
   }
-  function encodeFrame(kind, cmd, payload = [], seq = 0) {
+  function encodeFrame(kind, cmd, payload = [], seq = 0, { legacy = false } = {}) {
     if (kind !== "get" && kind !== "set") throw new Error(`Bad frame kind ${kind}`);
     if (!ALLOWED[kind].has(cmd)) {
       throw new Error(`Refusing to send ${kind.toUpperCase()} ${hex(cmd)} (${CMD_NAMES[cmd] ?? "unknown"}): not on this app's allowlist.`);
@@ -1282,8 +1283,9 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     if (payload.length > 56) throw new Error("Payload too long");
     for (const b of payload) if (!Number.isInteger(b) || b < 0 || b > 255) throw new Error(`Bad payload byte ${b}`);
     const hdr = kind === "set" ? SET_HDR : GET_HDR;
+    if (legacy) seq = 0;
     const body = [hdr[0], hdr[1], seq >> 8 & 255, seq & 255, cmd, payload.length, ...payload];
-    return Uint8Array.from([...body, crc8(body), END]);
+    return Uint8Array.from([...body, legacy ? 0 : crc8(body), END]);
   }
   function decodeFrame(input) {
     const b = input instanceof Uint8Array ? input : new Uint8Array(input.buffer ?? input, input.byteOffset ?? 0, input.byteLength ?? input.length);
@@ -1373,6 +1375,9 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
   function hex(x) {
     return x.toString(16).toUpperCase().padStart(2, "0");
   }
+  function hexBytes(bytes) {
+    return Array.from(bytes, hex).join(" ");
+  }
   function fmtGain(g) {
     return (g > 0 ? "+" : "") + g.toFixed(1);
   }
@@ -1456,7 +1461,10 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       this.unsolicited = /* @__PURE__ */ new Set();
       this.closed = false;
       this.seqEcho = null;
-      this.stats = { tx: 0, rx: 0, crcBad: 0, timeouts: 0, unsolicited: 0 };
+      this.framing = "current";
+      this.stats = { tx: 0, frames: 0, crcBad: 0, timeouts: 0, unsolicited: 0, empty: 0, emptyNearTx: 0, unparsed: 0 };
+      this.lastTxAt = 0;
+      this._quiet = { empty: 0, emptyNearTx: 0, unparsed: 0, since: 0, timer: null, seenUnparsed: /* @__PURE__ */ new Set() };
       this._onInput = (ev) => this._handleInput(ev);
     }
     async open() {
@@ -1467,6 +1475,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     }
     async close() {
       this.closed = true;
+      this._flushQuiet(true);
       this.device.removeEventListener("inputreport", this._onInput);
       this._failAll(new LinkError("Connection closed", "closed"));
       try {
@@ -1476,6 +1485,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     }
     markDisconnected() {
       this.closed = true;
+      this._flushQuiet(true);
       this.device.removeEventListener("inputreport", this._onInput);
       this._failAll(new LinkError("Device disconnected", "disconnected"));
     }
@@ -1495,17 +1505,31 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     }
     _handleInput(ev) {
       const data = new Uint8Array(ev.data.buffer, ev.data.byteOffset, ev.data.byteLength);
-      const frame = decodeFrame(data);
-      this.stats.rx++;
-      const shown = frame.payload ? data.slice(0, 8 + frame.payload.length) : data;
       const idNote = ev.reportId !== void 0 && ev.reportId !== this.reportId ? ` [input report ${ev.reportId}]` : "";
-      if (!frame.valid) {
-        this.log?.rx(`unparsed report${idNote} (${frame.error ?? "bad frame"})`, data);
+      if (data.every((b) => b === 0)) {
+        this.stats.empty++;
+        const near = Date.now() - this.lastTxAt < 150;
+        if (near) this.stats.emptyNearTx++;
+        this._noteQuiet("empty", near, () => `Input report ${ev.reportId ?? "?"} arrives as ${data.length} zero bytes. These carry no data; from now on they are counted and summarised every few seconds instead of logged.`);
         return;
       }
+      const frame = decodeFrame(data);
+      const shown = frame.payload ? data.slice(0, 8 + frame.payload.length) : data;
+      if (!frame.valid) {
+        this.stats.unparsed++;
+        const key = `${ev.reportId}:${hexBytes(data.slice(0, 16))}`;
+        if (this._quiet.seenUnparsed.size < 12 && !this._quiet.seenUnparsed.has(key)) {
+          this._quiet.seenUnparsed.add(key);
+          this.log?.rx(`unparsed report${idNote} (${frame.error ?? "bad frame"}, ${data.length} bytes)`, data);
+        } else {
+          this._noteQuiet("unparsed", false, null);
+        }
+        return;
+      }
+      this.stats.frames++;
       let note = "";
       if (!frame.crcOk) {
-        note = " CRC MISMATCH";
+        note = frame.crc === 0 ? " (checksum 00, legacy style)" : " CRC MISMATCH";
         this.stats.crcBad++;
       }
       const waiter = this.waiters.find((w) => w.match(frame) && (this.seqEcho !== true || w.anySeq || frame.seq === w.seq));
@@ -1530,6 +1554,29 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         }
       }
     }
+    _noteQuiet(kind, nearTx, firstMessage) {
+      const q = this._quiet;
+      if (kind === "empty" && this.stats.empty === 1 && firstMessage) this.log?.info(firstMessage());
+      q[kind]++;
+      if (nearTx) q.emptyNearTx++;
+      if (!q.since) q.since = Date.now();
+      if (!q.timer) q.timer = setTimeout(() => this._flushQuiet(), 5e3);
+    }
+    _flushQuiet(final = false) {
+      const q = this._quiet;
+      clearTimeout(q.timer);
+      q.timer = null;
+      if (!q.empty && !q.unparsed) return;
+      const secs = Math.max(1e-3, (Date.now() - q.since) / 1e3);
+      const parts = [];
+      if (q.empty) parts.push(`${q.empty} all-zero reports (${(q.empty / secs).toFixed(1)}/s; ${q.emptyNearTx} within 150 ms after a command we sent)`);
+      if (q.unparsed) parts.push(`${q.unparsed} more unparsed reports`);
+      this.log?.info(`Ignored ${parts.join(" and ")} in the last ${secs.toFixed(1)} s${final ? " (final count)" : ""}.`);
+      q.empty = 0;
+      q.emptyNearTx = 0;
+      q.unparsed = 0;
+      q.since = 0;
+    }
     _enqueue(task) {
       const run = this.queue.then(task, task);
       this.queue = run.then(() => sleep(this.gapMs), () => sleep(this.gapMs));
@@ -1544,6 +1591,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       }
       this.log?.tx(text, frameBytes);
       this.stats.tx++;
+      this.lastTxAt = Date.now();
       try {
         await this.device.sendReport(this.reportId, data);
       } catch (e) {
@@ -1571,10 +1619,11 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       return this._enqueue(async () => {
         let lastErr;
         for (let attempt = 0; attempt <= retries; attempt++) {
-          const seq = this._nextSeq();
-          const bytes = encodeFrame("get", cmd, payload, seq);
+          const legacy = this.framing === "legacy";
+          const seq = legacy ? 0 : this._nextSeq();
+          const bytes = encodeFrame("get", cmd, payload, seq, { legacy });
           const frame = decodeFrame(bytes);
-          const wait2 = this._wait((f) => f.kind === "get" && f.cmd === cmd && (!match || match(f.payload)), seq, timeoutMs, true);
+          const wait2 = this._wait((f) => f.kind === "get" && f.cmd === cmd && (!match || match(f.payload)), seq, timeoutMs, false, legacy);
           try {
             await this._send(bytes, this._describe(frame) + (attempt ? ` (retry ${attempt})` : ""));
             return await wait2;
@@ -1597,8 +1646,9 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     // returned, but none is required: verification is done by reading back.
     set(cmd, payload = [], { listenMs = 60 } = {}) {
       return this._enqueue(async () => {
-        const seq = this._nextSeq();
-        const bytes = encodeFrame("set", cmd, payload, seq);
+        const legacy = this.framing === "legacy";
+        const seq = legacy ? 0 : this._nextSeq();
+        const bytes = encodeFrame("set", cmd, payload, seq, { legacy });
         const frame = decodeFrame(bytes);
         const wait2 = this._wait((f) => f.cmd === cmd && (f.kind === "set" || payloadEquals(f.payload, payload)), seq, listenMs, false, true);
         try {
@@ -1673,6 +1723,24 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       for (let i = 0; i < n; i++) bands.push(await this.readBand(i));
       return bands;
     }
+    // Find a frame format the device answers, using a harmless GET. FiiO's
+    // current app sends a sequence number and CRC; its older app and devicePEQ
+    // send zeros there. Both are tried, current first.
+    async probe() {
+      for (const framing of ["current", "legacy"]) {
+        this.link.framing = framing;
+        this.log?.info(framing === "current" ? "Probing with FiiO's current frame format (sequence number and CRC): GET PEQ_COUNT" : "No answer. Probing with the older frame format (sequence 00 00, checksum 00): GET PEQ_COUNT");
+        try {
+          const n = await this.readBandCount();
+          this.log?.info(`The device answers the ${framing} frame format; using it from now on.`);
+          return { framing, bandCount: n };
+        } catch (e) {
+          if (e.code !== "timeout") throw e;
+        }
+      }
+      this.link.framing = "current";
+      return null;
+    }
     // Everything readable without changing anything.
     async identify() {
       const info = {};
@@ -1684,10 +1752,22 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
           info.errors = [...info.errors ?? [], `${key}: ${e.message}`];
         }
       };
+      let p = null;
+      try {
+        p = await this.probe();
+      } catch (e) {
+        info.errors = [`probe: ${e.message}`];
+      }
+      if (!p) {
+        info.noAnswer = true;
+        this.log?.error("The device did not answer GET PEQ_COUNT in either frame format. Nothing further was sent.");
+        return info;
+      }
+      info.framing = p.framing;
+      info.bandCount = p.bandCount;
       await tryRead("firmware", () => this.readFirmware());
       await tryRead("eqSwitch", () => this.readEqSwitch());
       await tryRead("preset", () => this.readPreset());
-      await tryRead("bandCount", () => this.readBandCount());
       await tryRead("globalGain", () => this.readGlobalGain());
       if (info.bandCount) await tryRead("bands", () => this.readBands(info.bandCount));
       return info;
@@ -1848,6 +1928,10 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         // drop every Nth reply
         latencyMs: 4,
         echoSeq: true,
+        emptyEveryMs: 0,
+        // send an all-zero report this often, like a device answering every USB poll
+        legacyOnly: false,
+        // only answer frames with sequence 00 00 and checksum 00; zeros otherwise
         ...options
       };
       this.productName = "FIIO BTR15 (simulated)";
@@ -1889,9 +1973,22 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     }
     async open() {
       this.opened = true;
+      if (this.options.emptyEveryMs) this._emptyTimer = setInterval(() => this._emit(new Uint8Array(32)), this.options.emptyEveryMs);
     }
     async close() {
       this.opened = false;
+      clearInterval(this._emptyTimer);
+    }
+    _emit(report) {
+      setTimeout(() => {
+        if (!this.opened) return;
+        const ev = new Event("inputreport");
+        ev.data = new DataView(report.buffer);
+        ev.reportId = 7;
+        ev.device = this;
+        this.dispatchEvent(ev);
+        this.oninputreport?.(ev);
+      }, this.options.latencyMs);
     }
     async sendReport(reportId, data) {
       if (!this.opened) throw new Error("Device not open");
@@ -1900,6 +1997,10 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       const f = decodeFrame(bytes);
       this.received.push(f);
       if (!f.valid) return;
+      if (this.options.legacyOnly && (f.seq !== 0 || f.crc !== 0)) {
+        this._emit(new Uint8Array(32));
+        return;
+      }
       const p = f.payload;
       if (f.kind === "get") {
         switch (f.cmd) {
@@ -1964,14 +2065,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       const frame = [...body, crc8(body), 238];
       const report = new Uint8Array(63);
       report.set(frame);
-      setTimeout(() => {
-        const ev = new Event("inputreport");
-        ev.data = new DataView(report.buffer);
-        ev.reportId = 7;
-        ev.device = this;
-        this.dispatchEvent(ev);
-        this.oninputreport?.(ev);
-      }, this.options.latencyMs);
+      this._emit(report);
     }
   };
   function clone(x) {
@@ -1980,16 +2074,28 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
 
   // app/log.js
   var TrafficLog = class {
-    constructor({ limit = 5e3 } = {}) {
+    // The first `keepHead` entries (connection details, first replies) are kept
+    // for good, so a flood later on cannot push them out of a copied log.
+    constructor({ limit = 5e3, keepHead = 300 } = {}) {
+      this.head = [];
       this.entries = [];
+      this.dropped = 0;
       this.limit = limit;
+      this.keepHead = keepHead;
       this.listeners = /* @__PURE__ */ new Set();
       this.t0 = Date.now();
     }
     add(kind, text, bytes = null) {
       const e = { t: Date.now(), kind, text, hex: bytes ? toHex(bytes) : null };
-      this.entries.push(e);
-      if (this.entries.length > this.limit) this.entries.splice(0, this.entries.length - this.limit);
+      if (this.head.length < this.keepHead) this.head.push(e);
+      else {
+        this.entries.push(e);
+        if (this.entries.length > this.limit) {
+          const n = this.entries.length - this.limit;
+          this.entries.splice(0, n);
+          this.dropped += n;
+        }
+      }
       for (const l of this.listeners) l(e);
       return e;
     }
@@ -2013,7 +2119,9 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       return () => this.listeners.delete(fn);
     }
     clear() {
+      this.head = [];
       this.entries = [];
+      this.dropped = 0;
       this.t0 = Date.now();
       for (const l of this.listeners) l(null);
     }
@@ -2024,7 +2132,9 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
                ${e.hex}` : ""}`;
     }
     toText(header = "") {
-      return (header ? header + "\n" : "") + this.entries.map((e) => this.format(e)).join("\n") + "\n";
+      const gap = this.dropped ? [`\u2026 ${this.dropped} entries omitted \u2026`] : [];
+      const lines = [...this.head.map((e) => this.format(e)), ...gap, ...this.entries.map((e) => this.format(e))];
+      return (header ? header + "\n" : "") + lines.join("\n") + "\n";
     }
   };
   function toHex(bytes) {
@@ -2459,7 +2569,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       `BTR15 PEQ Writer ${APP_VERSION}  ${location.href}`,
       `Time ${(/* @__PURE__ */ new Date()).toISOString()}  ${navigator.userAgent}`,
       c ? `Device "${c.device.productName}" VID 0x${hex42(c.device.vendorId)} PID 0x${hex42(c.device.productId)}${c.sim ? " (SIMULATED)" : ""}` : "Device: none",
-      c ? `Link stats ${JSON.stringify(c.link.stats)} seqEcho=${c.link.seqEcho}` : "",
+      c ? `Link stats ${JSON.stringify(c.link.stats)} framing=${c.link.framing} seqEcho=${c.link.seqEcho} reportId=${c.link.reportId} padTo=${c.link.padTo}` : "",
       `Model ${state.model}  allowWrites=${$("allowWrites").checked}`,
       "----"
     ].filter(Boolean).join("\n");
@@ -2476,7 +2586,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
   $("btnSaveLog").onclick = () => download(`btr15-log-${stamp()}.txt`, log.toText(logHeader()));
   $("btnClearLog").onclick = () => log.clear();
   function canWrite() {
-    return !!(state.conn && state.conn.isBtr15 && $("allowWrites").checked && !state.busy && !state.conn.link.closed && !ls.active);
+    return !!(state.conn && state.conn.isBtr15 && state.info && !state.info.noAnswer && $("allowWrites").checked && !state.busy && !state.conn.link.closed && !ls.active);
   }
   function updateControls() {
     const connected = !!state.conn && !state.conn.link.closed;
@@ -2636,8 +2746,14 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     await busy("Reading device", async () => {
       const info = await state.conn.btr.identify();
       state.info = info;
+      if (info.noAnswer) {
+        setStatus("No answer from device", "bad");
+        await alertDlg("The BTR15 did not answer", `<p>The page asked for the band count in both of FiiO's frame formats and got no reply. Nothing was written.</p>
+        <p>Please press <b>Copy log</b> and paste it into the chat. Also check that FiiO Control and fiiocontrol.fiio.com are closed, then try unplugging and reconnecting.</p>`);
+        return;
+      }
       if (info.errors?.length) log.warn(`Some reads failed: ${info.errors.join("; ")}`);
-      log.info(`Read: firmware ${info.firmware?.join(".") ?? "?"}, EQ switch ${info.eqSwitch === null ? "?" : info.eqSwitch ? "on" : "off"}, preset ${info.preset ?? "?"} (${info.preset != null ? slotName(info.preset) : "?"}), ${info.bandCount ?? "?"} bands, global gain ${info.globalGain ?? "?"} dB`);
+      log.info(`Frame format: ${info.framing}. Read: firmware ${info.firmware?.join(".") ?? "?"}, EQ switch ${info.eqSwitch === null ? "?" : info.eqSwitch ? "on" : "off"}, preset ${info.preset ?? "?"} (${info.preset != null ? slotName(info.preset) : "?"}), ${info.bandCount ?? "?"} bands, global gain ${info.globalGain ?? "?"} dB`);
       if (info.bands && info.preset != null) {
         state.slots[info.preset] = { globalGain: info.globalGain, bands: info.bands, readAt: Date.now() };
         logSlot(info.preset, state.slots[info.preset]);
@@ -2661,9 +2777,11 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     $("fSwitch").textContent = info?.eqSwitch == null ? "\u2013" : info.eqSwitch ? "On" : "Off";
     $("fPreset").textContent = info?.preset == null ? "\u2013" : `${slotName(info.preset)} (${info.preset})`;
     $("fBands").textContent = info?.bandCount ?? "\u2013";
+    $("fFraming").textContent = info?.noAnswer ? "no answer" : info?.framing === "legacy" ? "older (zeros)" : info?.framing ? "current (seq + CRC)" : "\u2013";
     $("fGain").textContent = info?.globalGain == null ? "\u2013" : `${fmtG(info.globalGain)} dB`;
     const warn = [];
     if (!c.isBtr15) warn.push("This is not a BTR15, so writing is disabled.");
+    if (info?.noAnswer) warn.push("The device did not answer. Copy the log and paste it into the chat.");
     if (info?.eqSwitch === 0) warn.push("The BTR15 reports its EQ switch as OFF, so no preset is audible. Turn it on from the device or with the button below. FiiO says the BTR15 re-connects over USB when EQ is toggled, so audio may drop for a moment.");
     if (info?.bandCount && info.bandCount !== BTR15.expectedBands) warn.push(`The device reports ${info.bandCount} bands; FiiO's app assumes ${BTR15.expectedBands}.`);
     if (info?.preset != null && !BTR15.slots.some((s) => s.id === info.preset)) warn.push(`Active preset ${info.preset} is not in FiiO's BTR15 table.`);

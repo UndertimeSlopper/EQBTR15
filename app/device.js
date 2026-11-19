@@ -67,7 +67,10 @@ export class FiioLink {
     this.unsolicited = new Set();
     this.closed = false;
     this.seqEcho = null; // learned: does the device echo our sequence number?
-    this.stats = { tx: 0, rx: 0, crcBad: 0, timeouts: 0, unsolicited: 0 };
+    this.framing = 'current'; // or 'legacy' (seq 00 00, checksum 00)
+    this.stats = { tx: 0, frames: 0, crcBad: 0, timeouts: 0, unsolicited: 0, empty: 0, emptyNearTx: 0, unparsed: 0 };
+    this.lastTxAt = 0;
+    this._quiet = { empty: 0, emptyNearTx: 0, unparsed: 0, since: 0, timer: null, seenUnparsed: new Set() };
     this._onInput = (ev) => this._handleInput(ev);
   }
 
@@ -80,6 +83,7 @@ export class FiioLink {
 
   async close() {
     this.closed = true;
+    this._flushQuiet(true);
     this.device.removeEventListener('inputreport', this._onInput);
     this._failAll(new LinkError('Connection closed', 'closed'));
     try { if (this.device.opened) await this.device.close(); } catch { /* already gone */ }
@@ -87,6 +91,7 @@ export class FiioLink {
 
   markDisconnected() {
     this.closed = true;
+    this._flushQuiet(true);
     this.device.removeEventListener('inputreport', this._onInput);
     this._failAll(new LinkError('Device disconnected', 'disconnected'));
   }
@@ -104,16 +109,34 @@ export class FiioLink {
 
   _handleInput(ev) {
     const data = new Uint8Array(ev.data.buffer, ev.data.byteOffset, ev.data.byteLength);
-    const frame = decodeFrame(data);
-    this.stats.rx++;
-    const shown = frame.payload ? data.slice(0, 8 + frame.payload.length) : data;
     const idNote = ev.reportId !== undefined && ev.reportId !== this.reportId ? ` [input report ${ev.reportId}]` : '';
-    if (!frame.valid) {
-      this.log?.rx(`unparsed report${idNote} (${frame.error ?? 'bad frame'})`, data);
+    // Reports that are all zeros carry nothing. Some devices send them on every
+    // USB poll, so they are counted and summarised instead of logged one by one.
+    if (data.every((b) => b === 0)) {
+      this.stats.empty++;
+      const near = Date.now() - this.lastTxAt < 150;
+      if (near) this.stats.emptyNearTx++;
+      this._noteQuiet('empty', near, () => `Input report ${ev.reportId ?? '?'} arrives as ${data.length} zero bytes. These carry no data; from now on they are counted and summarised every few seconds instead of logged.`);
       return;
     }
+    const frame = decodeFrame(data);
+    const shown = frame.payload ? data.slice(0, 8 + frame.payload.length) : data;
+    if (!frame.valid) {
+      this.stats.unparsed++;
+      const key = `${ev.reportId}:${hexBytes(data.slice(0, 16))}`;
+      if (this._quiet.seenUnparsed.size < 12 && !this._quiet.seenUnparsed.has(key)) {
+        this._quiet.seenUnparsed.add(key);
+        this.log?.rx(`unparsed report${idNote} (${frame.error ?? 'bad frame'}, ${data.length} bytes)`, data);
+      } else {
+        this._noteQuiet('unparsed', false, null);
+      }
+      return;
+    }
+    this.stats.frames++;
+    // A CRC mismatch is logged but not fatal: USB already protects the bytes,
+    // and FiiO's own app does not check most reply checksums.
     let note = '';
-    if (!frame.crcOk) { note = ' CRC MISMATCH'; this.stats.crcBad++; }
+    if (!frame.crcOk) { note = frame.crc === 0 ? ' (checksum 00, legacy style)' : ' CRC MISMATCH'; this.stats.crcBad++; }
     // Once the device has shown it echoes our sequence number, require it, so
     // an echo of an earlier SET can never pass as the reply to a later GET.
     const waiter = this.waiters.find((w) => w.match(frame) && (this.seqEcho !== true || w.anySeq || frame.seq === w.seq));
@@ -134,6 +157,28 @@ export class FiioLink {
     for (const fn of this.unsolicited) { try { fn(frame); } catch { /* listener error */ } }
   }
 
+  _noteQuiet(kind, nearTx, firstMessage) {
+    const q = this._quiet;
+    if (kind === 'empty' && this.stats.empty === 1 && firstMessage) this.log?.info(firstMessage());
+    q[kind]++;
+    if (nearTx) q.emptyNearTx++;
+    if (!q.since) q.since = Date.now();
+    if (!q.timer) q.timer = setTimeout(() => this._flushQuiet(), 5000);
+  }
+
+  _flushQuiet(final = false) {
+    const q = this._quiet;
+    clearTimeout(q.timer);
+    q.timer = null;
+    if (!q.empty && !q.unparsed) return;
+    const secs = Math.max(0.001, (Date.now() - q.since) / 1000);
+    const parts = [];
+    if (q.empty) parts.push(`${q.empty} all-zero reports (${(q.empty / secs).toFixed(1)}/s; ${q.emptyNearTx} within 150 ms after a command we sent)`);
+    if (q.unparsed) parts.push(`${q.unparsed} more unparsed reports`);
+    this.log?.info(`Ignored ${parts.join(' and ')} in the last ${secs.toFixed(1)} s${final ? ' (final count)' : ''}.`);
+    q.empty = 0; q.emptyNearTx = 0; q.unparsed = 0; q.since = 0;
+  }
+
   _enqueue(task) {
     const run = this.queue.then(task, task);
     this.queue = run.then(() => sleep(this.gapMs), () => sleep(this.gapMs));
@@ -146,6 +191,7 @@ export class FiioLink {
     if (this.padTo && data.length < this.padTo) { data = new Uint8Array(this.padTo); data.set(frameBytes); }
     this.log?.tx(text, frameBytes);
     this.stats.tx++;
+    this.lastTxAt = Date.now();
     try {
       await this.device.sendReport(this.reportId, data);
     } catch (e) {
@@ -172,10 +218,11 @@ export class FiioLink {
     return this._enqueue(async () => {
       let lastErr;
       for (let attempt = 0; attempt <= retries; attempt++) {
-        const seq = this._nextSeq();
-        const bytes = encodeFrame('get', cmd, payload, seq);
+        const legacy = this.framing === 'legacy';
+        const seq = legacy ? 0 : this._nextSeq();
+        const bytes = encodeFrame('get', cmd, payload, seq, { legacy });
         const frame = decodeFrame(bytes);
-        const wait = this._wait((f) => f.kind === 'get' && f.cmd === cmd && (!match || match(f.payload)), seq, timeoutMs, true);
+        const wait = this._wait((f) => f.kind === 'get' && f.cmd === cmd && (!match || match(f.payload)), seq, timeoutMs, false, legacy);
         try {
           await this._send(bytes, this._describe(frame) + (attempt ? ` (retry ${attempt})` : ''));
           return await wait;
@@ -194,8 +241,9 @@ export class FiioLink {
   // returned, but none is required: verification is done by reading back.
   set(cmd, payload = [], { listenMs = 60 } = {}) {
     return this._enqueue(async () => {
-      const seq = this._nextSeq();
-      const bytes = encodeFrame('set', cmd, payload, seq);
+      const legacy = this.framing === 'legacy';
+      const seq = legacy ? 0 : this._nextSeq();
+      const bytes = encodeFrame('set', cmd, payload, seq, { legacy });
       const frame = decodeFrame(bytes);
       const wait = this._wait((f) => f.cmd === cmd && (f.kind === 'set' || payloadEquals(f.payload, payload)), seq, listenMs, false, true);
       try {

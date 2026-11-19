@@ -68,7 +68,9 @@ export function crc8(bytes, end = bytes.length) {
 }
 
 // ── Encoding ────────────────────────────────────────────────────────────────
-export function encodeFrame(kind, cmd, payload = [], seq = 0) {
+// `legacy` builds the older frame FiiO's previous app and devicePEQ send:
+// sequence number 00 00 and checksum 00.
+export function encodeFrame(kind, cmd, payload = [], seq = 0, { legacy = false } = {}) {
   if (kind !== 'get' && kind !== 'set') throw new Error(`Bad frame kind ${kind}`);
   if (!ALLOWED[kind].has(cmd)) {
     throw new Error(`Refusing to send ${kind.toUpperCase()} ${hex(cmd)} (${CMD_NAMES[cmd] ?? 'unknown'}): not on this app's allowlist.`);
@@ -76,8 +78,9 @@ export function encodeFrame(kind, cmd, payload = [], seq = 0) {
   if (payload.length > 56) throw new Error('Payload too long');
   for (const b of payload) if (!Number.isInteger(b) || b < 0 || b > 255) throw new Error(`Bad payload byte ${b}`);
   const hdr = kind === 'set' ? SET_HDR : GET_HDR;
+  if (legacy) seq = 0;
   const body = [hdr[0], hdr[1], (seq >> 8) & 0xFF, seq & 0xFF, cmd, payload.length, ...payload];
-  return Uint8Array.from([...body, crc8(body), END]);
+  return Uint8Array.from([...body, legacy ? 0 : crc8(body), END]);
 }
 
 // ── Decoding ────────────────────────────────────────────────────────────────

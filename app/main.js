@@ -53,7 +53,7 @@ function logHeader() {
     `BTR15 PEQ Writer ${APP_VERSION}  ${location.href}`,
     `Time ${new Date().toISOString()}  ${navigator.userAgent}`,
     c ? `Device "${c.device.productName}" VID 0x${hex4(c.device.vendorId)} PID 0x${hex4(c.device.productId)}${c.sim ? ' (SIMULATED)' : ''}` : 'Device: none',
-    c ? `Link stats ${JSON.stringify(c.link.stats)} seqEcho=${c.link.seqEcho}` : '',
+    c ? `Link stats ${JSON.stringify(c.link.stats)} framing=${c.link.framing} seqEcho=${c.link.seqEcho} reportId=${c.link.reportId} padTo=${c.link.padTo}` : '',
     `Model ${state.model}  allowWrites=${$('allowWrites').checked}`,
     '----',
   ].filter(Boolean).join('\n');
@@ -73,7 +73,7 @@ $('btnClearLog').onclick = () => log.clear();
 
 // ── Busy / write gating ─────────────────────────────────────────────────────
 function canWrite() {
-  return !!(state.conn && state.conn.isBtr15 && $('allowWrites').checked && !state.busy && !state.conn.link.closed && !ls.active);
+  return !!(state.conn && state.conn.isBtr15 && state.info && !state.info.noAnswer && $('allowWrites').checked && !state.busy && !state.conn.link.closed && !ls.active);
 }
 function updateControls() {
   const connected = !!state.conn && !state.conn.link.closed;
@@ -233,8 +233,14 @@ async function identify(auto = false) {
   await busy('Reading device', async () => {
     const info = await state.conn.btr.identify();
     state.info = info;
+    if (info.noAnswer) {
+      setStatus('No answer from device', 'bad');
+      await alertDlg('The BTR15 did not answer', `<p>The page asked for the band count in both of FiiO's frame formats and got no reply. Nothing was written.</p>
+        <p>Please press <b>Copy log</b> and paste it into the chat. Also check that FiiO Control and fiiocontrol.fiio.com are closed, then try unplugging and reconnecting.</p>`);
+      return;
+    }
     if (info.errors?.length) log.warn(`Some reads failed: ${info.errors.join('; ')}`);
-    log.info(`Read: firmware ${info.firmware?.join('.') ?? '?'}, EQ switch ${info.eqSwitch === null ? '?' : info.eqSwitch ? 'on' : 'off'}, preset ${info.preset ?? '?'} (${info.preset != null ? slotName(info.preset) : '?'}), ${info.bandCount ?? '?'} bands, global gain ${info.globalGain ?? '?'} dB`);
+    log.info(`Frame format: ${info.framing}. Read: firmware ${info.firmware?.join('.') ?? '?'}, EQ switch ${info.eqSwitch === null ? '?' : info.eqSwitch ? 'on' : 'off'}, preset ${info.preset ?? '?'} (${info.preset != null ? slotName(info.preset) : '?'}), ${info.bandCount ?? '?'} bands, global gain ${info.globalGain ?? '?'} dB`);
     if (info.bands && info.preset != null) {
       state.slots[info.preset] = { globalGain: info.globalGain, bands: info.bands, readAt: Date.now() };
       logSlot(info.preset, state.slots[info.preset]);
@@ -257,10 +263,12 @@ function renderDevice() {
   $('fSwitch').textContent = info?.eqSwitch == null ? '–' : info.eqSwitch ? 'On' : 'Off';
   $('fPreset').textContent = info?.preset == null ? '–' : `${slotName(info.preset)} (${info.preset})`;
   $('fBands').textContent = info?.bandCount ?? '–';
+  $('fFraming').textContent = info?.noAnswer ? 'no answer' : info?.framing === 'legacy' ? 'older (zeros)' : info?.framing ? 'current (seq + CRC)' : '–';
   $('fGain').textContent = info?.globalGain == null ? '–' : `${fmtG(info.globalGain)} dB`;
 
   const warn = [];
   if (!c.isBtr15) warn.push('This is not a BTR15, so writing is disabled.');
+  if (info?.noAnswer) warn.push('The device did not answer. Copy the log and paste it into the chat.');
   if (info?.eqSwitch === 0) warn.push('The BTR15 reports its EQ switch as OFF, so no preset is audible. Turn it on from the device or with the button below. FiiO says the BTR15 re-connects over USB when EQ is toggled, so audio may drop for a moment.');
   if (info?.bandCount && info.bandCount !== BTR15.expectedBands) warn.push(`The device reports ${info.bandCount} bands; FiiO's app assumes ${BTR15.expectedBands}.`);
   if (info?.preset != null && !BTR15.slots.some((s) => s.id === info.preset)) warn.push(`Active preset ${info.preset} is not in FiiO's BTR15 table.`);
