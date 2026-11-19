@@ -164,3 +164,15 @@ test('repeated pushed values are summarised, not logged one by one', async () =>
   assert.equal(lines.length, 1, log.toText());
   await link.close();
 });
+
+test('an instant "in progress" on a fresh connection is reported as a stuck browser pairing', async () => {
+  const dev = new SimulatedBtr15Ble();
+  dev.cmdChar.writeValueWithResponse = async () => { throw new DOMException('Connection already in progress.', 'NetworkError'); };
+  const log = new TrafficLog();
+  const link = new BleLink(dev, { log, timeoutMs: 100, profile: fast });
+  await link.open();
+  const info = await new Btr15Bt(link, { profile: fast, log }).identify();
+  assert.equal(info.authFailed, true);
+  assert.equal(info.browserPairingStuck, true);
+  await link.close();
+});

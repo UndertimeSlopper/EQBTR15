@@ -40,12 +40,18 @@ export class BleLink {
   // Connect GATT and find the GAIA characteristics (also used to reconnect).
   async _attach() {
     const d = this.device;
-    this.server = await d.gatt.connect();
     let service;
-    try {
-      service = await this.server.getPrimaryService(GAIA_SERVICE);
-    } catch (e) {
-      throw new LinkError(`The device has no Qualcomm GAIA service (${e.message}). Is this the BTR15?`, 'noservice');
+    for (let attempt = 1; ; attempt++) {
+      this.server = await d.gatt.connect();
+      try {
+        service = await this.server.getPrimaryService(GAIA_SERVICE);
+        break;
+      } catch (e) {
+        // The link can drop right after connecting; try again a couple of times.
+        if (/disconnected/i.test(e.message) && attempt < 3) { await sleep(1000); continue; }
+        if (/disconnected/i.test(e.message)) throw new LinkError(`The Bluetooth link dropped while connecting (${e.message}).`, 'send');
+        throw new LinkError(`The device has no Qualcomm GAIA service (${e.message}). Is this the BTR15?`, 'noservice');
+      }
     }
     this.cmdChar = await service.getCharacteristic(GAIA_COMMAND);
     this.respChar = await service.getCharacteristic(GAIA_RESPONSE);
@@ -154,6 +160,7 @@ export class BleLink {
     } catch (e0) {
       let e = e0;
       const inProgress = (x) => /in progress/i.test(`${x.message ?? x}`);
+      if (inProgress(e) && this.stats.tx === 1) this.instantInProgress = true;
       // The GAIA command characteristic needs an encrypted (paired) LE link.
       // When it is missing, Chrome/Edge pair on demand; while that pairing is
       // pending (or waiting for you to confirm it) writes fail with "already

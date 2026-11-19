@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BTR15 PEQ Writer</title>
-<!-- single-file build of a7d468b -->
+<!-- single-file build of b67cfd3 -->
 <meta name="description" content="Write, read back and verify parametric EQ presets on a FiiO BTR15 over USB (WebHID), with auto-EQ fitting of AutoEQ files.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23256f6a'/%3E%3Cpath d='M4 20 C9 20 9 9 14 9 S19 23 24 23 S27 16 28 16' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
@@ -2382,12 +2382,20 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     // Connect GATT and find the GAIA characteristics (also used to reconnect).
     async _attach() {
       const d = this.device;
-      this.server = await d.gatt.connect();
       let service;
-      try {
-        service = await this.server.getPrimaryService(GAIA_SERVICE);
-      } catch (e) {
-        throw new LinkError(`The device has no Qualcomm GAIA service (${e.message}). Is this the BTR15?`, "noservice");
+      for (let attempt = 1; ; attempt++) {
+        this.server = await d.gatt.connect();
+        try {
+          service = await this.server.getPrimaryService(GAIA_SERVICE);
+          break;
+        } catch (e) {
+          if (/disconnected/i.test(e.message) && attempt < 3) {
+            await sleep(1e3);
+            continue;
+          }
+          if (/disconnected/i.test(e.message)) throw new LinkError(`The Bluetooth link dropped while connecting (${e.message}).`, "send");
+          throw new LinkError(`The device has no Qualcomm GAIA service (${e.message}). Is this the BTR15?`, "noservice");
+        }
       }
       this.cmdChar = await service.getCharacteristic(GAIA_COMMAND);
       this.respChar = await service.getCharacteristic(GAIA_RESPONSE);
@@ -2505,6 +2513,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       } catch (e0) {
         let e = e0;
         const inProgress = (x) => /in progress/i.test(`${x.message ?? x}`);
+        if (inProgress(e) && this.stats.tx === 1) this.instantInProgress = true;
         for (let i = 0; i < 4 && inProgress(e); i++) {
           if (i === 0) this.log?.warn("Bluetooth says a connection or pairing is in progress; waiting for it (accept any pairing prompt from Windows or the browser)\u2026");
           await sleep(1500);
@@ -2872,6 +2881,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         info.noAnswer = true;
         if (firstError.code === "auth") {
           info.authFailed = true;
+          info.browserPairingStuck = !!this.link.instantInProgress && /in progress/i.test(firstError.message);
           this.log?.error("The BTR15 refused the command: this computer is not paired with it for Bluetooth control. Nothing further was sent.");
         } else if (firstError.code === "timeout") {
           this.log?.error("The BTR15 did not answer the version request over Bluetooth. Nothing further was sent.");
@@ -3712,6 +3722,16 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       state.info = info;
       if (info.noAnswer) {
         setStatus("No answer from device", "bad");
+        if (info.authFailed && info.browserPairingStuck) {
+          setStatus("Browser pairing stuck", "bad");
+          await alertDlg("Restart the browser, then pair", `<p>The very first command was refused at once with <b>"Connection already in progress"</b>, even on a fresh connection, while the BTR15 itself was answering. That message comes from the browser's own Bluetooth pairing: an earlier pairing attempt is most likely still stuck inside the browser, so it refuses new ones. Reloading the page does not clear it; restarting the browser does. Nothing was written.</p>
+          <ol>
+            <li>Close the browser completely. Edge can keep running in the background, so restarting Windows is the surest way. Using Chrome instead of Edge (or the other way round) also gives a clean start.</li>
+            <li>Close FiiO Control on the phone, and put the BTR15 in pairing mode (screen shows <b>PAIRING</b>).</li>
+            <li>Open this page, press <b>Connect BTR15</b> and pick it. When the first command is sent, the browser tries to pair: <b>watch for a pairing prompt</b> (from the browser near the address bar, or a Windows notification) and accept it.</li>
+          </ol>`);
+          return;
+        }
         if (info.authFailed) {
           setStatus("Not paired", "bad");
           await alertDlg("The BTR15 needs a Bluetooth LE pairing", `<p>The BTR15 accepted the connection but refused the first command (<b>${esc(info.errors?.[0] ?? "")}</b>). It only takes commands over an encrypted Bluetooth LE link, which needs an <b>LE pairing</b> with this computer. The usual Windows "Add device" pairing is for audio and is not enough. Nothing was written.</p>

@@ -11,10 +11,11 @@ Before you start, close FiiO Control on your phone.
 The BTR15 takes commands only over an encrypted Bluetooth LE link, so the first
 connection has to pair over LE:
 
-1. In Windows **Settings → Bluetooth & devices**, remove the BTR15 if it is listed (**⋯ → Remove device**).
+1. Restart the browser completely (restarting Windows is surest, since Edge can keep running in the background). A pairing attempt stuck inside the browser makes every command fail at once with "Connection already in progress".
+   In Windows **Settings → Bluetooth & devices**, remove the BTR15 if it is listed (**⋯ → Remove device**).
 2. Put the BTR15 in pairing mode, so its screen shows **PAIRING**.
 3. Open the page, press **Connect BTR15** and pick **FIIO BTR15** in the Bluetooth list. Leave **Allow writing to the device** unticked.
-4. When the page sends its first command, the browser tries to pair. **Accept any pairing prompt** from Windows or the browser. The page waits a few seconds for it.
+4. When the page sends its first command, the browser tries to pair. **Watch for a pairing prompt** (from the browser near the address bar, or a Windows notification) and accept it. The page waits a few seconds for it.
 5. Check the Device panel: firmware (should be 4.4), EQ switch, active preset, and the bands of the active preset if it is a user preset.
 6. Press **Read USER1–3**. This reads all three user presets without switching presets.
 7. Compare what the page shows with FiiO Control for one of the user presets, then copy the log.

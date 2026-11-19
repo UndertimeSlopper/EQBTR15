@@ -353,6 +353,16 @@ async function identify(auto = false) {
     state.info = info;
     if (info.noAnswer) {
       setStatus('No answer from device', 'bad');
+      if (info.authFailed && info.browserPairingStuck) {
+        setStatus('Browser pairing stuck', 'bad');
+        await alertDlg('Restart the browser, then pair', `<p>The very first command was refused at once with <b>"Connection already in progress"</b>, even on a fresh connection, while the BTR15 itself was answering. That message comes from the browser's own Bluetooth pairing: an earlier pairing attempt is most likely still stuck inside the browser, so it refuses new ones. Reloading the page does not clear it; restarting the browser does. Nothing was written.</p>
+          <ol>
+            <li>Close the browser completely. Edge can keep running in the background, so restarting Windows is the surest way. Using Chrome instead of Edge (or the other way round) also gives a clean start.</li>
+            <li>Close FiiO Control on the phone, and put the BTR15 in pairing mode (screen shows <b>PAIRING</b>).</li>
+            <li>Open this page, press <b>Connect BTR15</b> and pick it. When the first command is sent, the browser tries to pair: <b>watch for a pairing prompt</b> (from the browser near the address bar, or a Windows notification) and accept it.</li>
+          </ol>`);
+        return;
+      }
       if (info.authFailed) {
         setStatus('Not paired', 'bad');
         await alertDlg('The BTR15 needs a Bluetooth LE pairing', `<p>The BTR15 accepted the connection but refused the first command (<b>${esc(info.errors?.[0] ?? '')}</b>). It only takes commands over an encrypted Bluetooth LE link, which needs an <b>LE pairing</b> with this computer. The usual Windows "Add device" pairing is for audio and is not enough. Nothing was written.</p>

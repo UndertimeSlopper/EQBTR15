@@ -109,6 +109,7 @@ export class Btr15Bt extends Btr15 {
       info.noAnswer = true;
       if (firstError.code === 'auth') {
         info.authFailed = true;
+        info.browserPairingStuck = !!this.link.instantInProgress && /in progress/i.test(firstError.message);
         this.log?.error('The BTR15 refused the command: this computer is not paired with it for Bluetooth control. Nothing further was sent.');
       } else if (firstError.code === 'timeout') {
         this.log?.error('The BTR15 did not answer the version request over Bluetooth. Nothing further was sent.');
