@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BTR15 PEQ Writer</title>
-<!-- single-file build of 444c26b -->
+<!-- single-file build of 37d3e38 -->
 <meta name="description" content="Write, read back and verify parametric EQ presets on a FiiO BTR15 over USB (WebHID), with auto-EQ fitting of AutoEQ files.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23256f6a'/%3E%3Cpath d='M4 20 C9 20 9 9 14 9 S19 23 24 23 S27 16 28 16' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
@@ -217,7 +217,8 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
   </div>
   <div class="conn">
     <span id="connStatus" class="chip">Not connected</span>
-    <button id="btnConnect" class="primary">Connect BTR15</button>
+    <button id="btnConnect" class="primary" title="Bluetooth serial link, as FiiO Control uses while the BTR15 plays audio">Connect BTR15</button>
+    <button id="btnConnectBle" title="Bluetooth Low Energy: FiiO Control's fallback route; Windows may need a separate pairing for it">Bluetooth LE</button>
     <button id="btnConnectUsb" title="Experimental: no FiiO software answers on the BTR15's USB control interface yet">USB (experimental)</button>
     <button id="btnDemo" title="A simulated BTR15 inside the page, for trying things out">Demo device</button>
     <button id="btnDisconnect" hidden>Disconnect</button>
@@ -225,7 +226,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
 </header>
 
 <div id="noBt" class="banner warn" hidden>
-  This browser has no Web Bluetooth. Use Chrome or Edge on a desktop, from an https:// address or a local file.
+  This browser has neither Web Serial nor Web Bluetooth. Use Chrome or Edge on a desktop, from an https:// address or a local file.
   The editor, fitting and exports still work without a device.
 </div>
 
@@ -238,7 +239,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         <input type="checkbox" id="allowWrites"> <span>Allow writing to the device</span>
       </label>
     </div>
-    <div id="devEmpty" class="muted">Turn the BTR15 on, close FiiO Control on your phone, then press <b>Connect BTR15</b> and pick it in the Bluetooth list. Connecting only reads. (FiiO's own app also talks to the BTR15 over Bluetooth; its USB control interface does not answer yet.)</div>
+    <div id="devEmpty" class="muted">Pair the BTR15 with Windows, close FiiO Control on your phone, then press <b>Connect BTR15</b> and pick its Bluetooth serial port. Connecting only reads. This is the same Bluetooth link FiiO Control uses; the BTR15's USB control interface does not answer.</div>
     <div id="devInfo" hidden>
       <dl class="facts">
         <div><dt>Model</dt><dd id="fModel">–</dd></div>
@@ -2133,6 +2134,50 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
   function hex42(v) {
     return v.toString(16).toUpperCase().padStart(4, "0");
   }
+  var SPP_UUID = "00001101-0000-1000-8000-00805f9b34fb";
+  function encodeGaiaSpp(cmd, data = []) {
+    const body = encodeGaia(cmd, data);
+    const d = Array.from(body.slice(5));
+    if (d.length + 1 > 254) throw new Error("Payload too long");
+    return Uint8Array.from([255, 3, 0, d.length + 1, 0, 29, 204, cmd >> 8 & 255, cmd & 255, ...d]);
+  }
+  function decodeGaiaSpp(input) {
+    const b = input instanceof Uint8Array ? input : Uint8Array.from(input);
+    if (b.length < 10 || b[0] !== 255) return { valid: false, raw: b, error: "not a GAIA serial packet" };
+    const end = b.length - (b[2] & 1 ? 1 : 0);
+    if (b[6] === 204) {
+      return { valid: true, kind: "request", cmd: b[7] << 8 | b[8], data: b.slice(9, end), raw: b };
+    }
+    return { valid: true, kind: "reply", cmd: b[7] << 8 | b[9], status: b[8], data: b.slice(10, end), raw: b, vendor: b[4] << 8 | b[5], cmdHi: b[6] };
+  }
+  var GaiaStreamParser = class {
+    constructor() {
+      this.buf = [];
+    }
+    push(chunk) {
+      for (const x of chunk) this.buf.push(x);
+      const packets = [];
+      const junk = [];
+      for (; ; ) {
+        if (!this.buf.length) break;
+        if (this.buf[0] !== 255) {
+          junk.push(this.buf.shift());
+          continue;
+        }
+        if (this.buf.length < 4) break;
+        const total = 8 + this.buf[3] + (this.buf[2] & 1 ? 1 : 0);
+        if (this.buf.length < total) break;
+        packets.push(Uint8Array.from(this.buf.splice(0, total)));
+      }
+      return { packets, junk: junk.length ? Uint8Array.from(junk) : null };
+    }
+    // Whatever is left over (used after a pause, so a mis-framed reply still shows up).
+    flush() {
+      const b = this.buf;
+      this.buf = [];
+      return b.length ? Uint8Array.from(b) : null;
+    }
+  };
 
   // app/sim.js
   var SimulatedBtr15Ble = class extends EventTarget {
@@ -2258,6 +2303,53 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     }
   };
   var BTR15_BT_FREQS = [32, 64, 125, 250, 500, 1e3, 2e3, 4e3, 8e3, 16e3];
+  var SimulatedBtr15Spp = class extends SimulatedBtr15Ble {
+    constructor(options = {}) {
+      super({ splitReplies: true, ...options });
+      this.name = "FiiO BTR15 (simulated serial)";
+      this.readable = null;
+      this.writable = null;
+    }
+    getInfo() {
+      return { bluetoothServiceClassId: "00001101-0000-1000-8000-00805f9b34fb", simulated: true };
+    }
+    async open() {
+      this.connected = true;
+      const sim = this;
+      this.readable = new ReadableStream({ start(c) {
+        sim._ctl = c;
+      } });
+      this.writable = new WritableStream({
+        write(chunk) {
+          const b = Uint8Array.from(chunk);
+          if (b[0] !== 255 || b.length < 9) return;
+          sim._handle(Uint8Array.from([0, 10, 4, b[7], b[8], ...b.slice(9)]));
+        }
+      });
+      if (this.options.emitNoise) this._ctl.enqueue(Uint8Array.from([0, 18]));
+    }
+    async close() {
+      this.connected = false;
+      try {
+        this._ctl?.close();
+      } catch {
+      }
+    }
+    _reply(cmd, status, data) {
+      this.replyCount++;
+      if (this.options.dropReplyEvery && this.replyCount % this.options.dropReplyEvery === 0) return;
+      const bytes = Uint8Array.from([255, 3, 0, data.length + 2, 0, 29, 205, cmd >> 8 & 255, status, cmd & 255, ...data]);
+      setTimeout(() => {
+        if (!this.connected) return;
+        if (this.options.splitReplies && bytes.length > 4) {
+          this._ctl.enqueue(bytes.slice(0, 3));
+          this._ctl.enqueue(bytes.slice(3));
+        } else {
+          this._ctl.enqueue(bytes);
+        }
+      }, this.options.latencyMs);
+    }
+  };
 
   // app/ble.js
   var BleLink = class {
@@ -2276,6 +2368,8 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       this.stats = { tx: 0, frames: 0, timeouts: 0, unsolicited: 0, badStatus: 0, unparsed: 0 };
       this._onNotify = (ev) => this._handleNotify(ev);
       this._onGone = () => this._gone();
+      this.encode = encodeGaia;
+      this.decode = decodeGaia;
     }
     async open() {
       const d = this.device;
@@ -2341,11 +2435,13 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     }
     _handleNotify(ev) {
       const v = ev.target.value;
-      const data = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
-      const f = decodeGaia(data);
+      this._handlePacket(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+    }
+    _handlePacket(data) {
+      const f = this.decode(data);
       if (!f.valid || f.kind !== "reply") {
         this.stats.unparsed++;
-        this.log?.rx(`notification not understood (${f.error ?? f.kind})`, data);
+        this.log?.rx(`packet not understood (${f.error ?? f.kind})`, data);
         return;
       }
       this.stats.frames++;
@@ -2451,8 +2547,8 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       return this._enqueue(async () => {
         let last;
         for (let attempt = 0; attempt <= retries; attempt++) {
-          const bytes = encodeGaia(cmd, data);
-          const f = decodeGaia(bytes);
+          const bytes = this.encode(cmd, data);
+          const f = this.decode(bytes);
           const wait2 = this._wait((r) => r.cmd === cmd && (r.status !== 0 || !match || match(r.data)), timeoutMs);
           try {
             await this._write(bytes, this._describe(f) + (attempt ? ` (retry ${attempt})` : ""));
@@ -2481,8 +2577,8 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     set(cmd, data = [], { listenMs = 1200 } = {}) {
       if (!isSetCommand(cmd)) throw new Error("set() needs a write command");
       return this._enqueue(async () => {
-        const bytes = encodeGaia(cmd, data);
-        const f = decodeGaia(bytes);
+        const bytes = this.encode(cmd, data);
+        const f = this.decode(bytes);
         const wait2 = this._wait((r2) => r2.cmd === cmd, listenMs);
         try {
           await this._write(bytes, this._describe(f));
@@ -2505,6 +2601,100 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     }
     idle() {
       return this.queue;
+    }
+  };
+  var SppLink = class extends BleLink {
+    constructor(port, opts = {}) {
+      super(port, { timeoutMs: 2e3, ...opts });
+      this.port = port;
+      this.transport = "bluetooth-serial";
+      this.encode = encodeGaiaSpp;
+      this.decode = decodeGaiaSpp;
+      this.parser = new GaiaStreamParser();
+    }
+    async open() {
+      const info = this.port.getInfo?.() ?? {};
+      this.log?.info(`Opening serial port ${JSON.stringify(info)}\u2026`);
+      try {
+        await this.port.open({ baudRate: 115200 });
+      } catch (e) {
+        throw new LinkError(`Could not open the serial port: ${e.message}`, "open");
+      }
+      this.writer = this.port.writable.getWriter();
+      this.closed = false;
+      this._readLoop();
+      this.log?.info("Serial port open.");
+    }
+    async _readLoop() {
+      try {
+        this.reader = this.port.readable.getReader();
+        for (; ; ) {
+          const { value, done } = await this.reader.read();
+          if (done) break;
+          if (!value?.length) continue;
+          const { packets, junk } = this.parser.push(value);
+          if (junk) {
+            this.stats.unparsed++;
+            this.log?.rx("bytes outside a GAIA packet", junk);
+          }
+          for (const pkt of packets) this._handlePacket(pkt);
+          clearTimeout(this._flushTimer);
+          if (this.parser.buf.length) {
+            this._flushTimer = setTimeout(() => {
+              const rest = this.parser.flush();
+              if (rest) {
+                this.stats.unparsed++;
+                this.log?.rx("incomplete packet (length did not match)", rest);
+              }
+            }, 300);
+          }
+        }
+      } catch (e) {
+        if (!this.closed) this.log?.warn(`Serial read stopped: ${e.message}`);
+      } finally {
+        try {
+          this.reader?.releaseLock();
+        } catch {
+        }
+        if (!this.closed) this._gone();
+      }
+    }
+    async _rawWrite(bytes) {
+      await this.writer.write(bytes);
+    }
+    async _write(bytes, text) {
+      if (this.closed) throw new LinkError("Not connected", "closed");
+      this.log?.tx(text, bytes);
+      this.stats.tx++;
+      try {
+        await this._rawWrite(bytes);
+      } catch (e) {
+        throw new LinkError(`Serial write failed: ${e.message ?? e}`, "send");
+      }
+    }
+    async close() {
+      this.closed = true;
+      this._failAll(new LinkError("Connection closed", "closed"));
+      clearTimeout(this._flushTimer);
+      try {
+        await this.reader?.cancel();
+      } catch {
+      }
+      try {
+        this.writer?.releaseLock();
+      } catch {
+      }
+      try {
+        await this.port.close();
+      } catch {
+      }
+    }
+    _gone() {
+      if (this.closed && !this.waiters.length) return;
+      this.closed = true;
+      this.log?.warn("Serial (Bluetooth) connection lost.");
+      this._failAll(new LinkError("Device disconnected", "disconnected"));
+      this.onDisconnect?.();
     }
   };
 
@@ -2596,7 +2786,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       return { preset: id, globalGain, bands };
     }
     async identify() {
-      const info = { transport: "bluetooth", encoding: "Bluetooth (GAIA over BLE)" };
+      const info = { transport: "bluetooth", encoding: this.link.transport === "bluetooth-serial" ? "Bluetooth serial (GAIA over SPP)" : "Bluetooth LE (GAIA over GATT)" };
       const tryRead = async (key, fn) => {
         try {
           info[key] = await fn();
@@ -3126,7 +3316,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
   var grid = new FreqGrid({ fmin: 20, fmax: 2e4, pointsPerOctave: 48 });
   var prof = () => state.conn?.btr.profile ?? BTR15_BT;
   var sname = (id) => slotName(id, prof());
-  var devName = (d) => d?.productName ?? d?.name ?? "device";
+  var devName = (d) => d?.productName ?? d?.name ?? (d?.getInfo ? "FiiO BTR15 (Bluetooth serial)" : "device");
   var state = {
     conn: null,
     // { device, link, btr, sim, isBtr15 }
@@ -3167,7 +3357,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     return [
       `BTR15 PEQ Writer ${APP_VERSION}  ${location.href}`,
       `Time ${(/* @__PURE__ */ new Date()).toISOString()}  ${navigator.userAgent}`,
-      !c ? "Device: none" : c.transport === "bluetooth" ? `Device "${devName(c.device)}" over Bluetooth${c.sim ? " (SIMULATED)" : ""}` : `Device "${devName(c.device)}" over USB VID 0x${hex43(c.device.vendorId)} PID 0x${hex43(c.device.productId)}${c.sim ? " (SIMULATED)" : ""}`,
+      !c ? "Device: none" : c.transport === "bluetooth" ? `Device "${devName(c.device)}" over ${c.link.transport === "bluetooth-serial" ? `Bluetooth serial ${JSON.stringify(c.device.getInfo?.() ?? {})}` : "Bluetooth LE"}${c.sim ? " (SIMULATED)" : ""}` : `Device "${devName(c.device)}" over USB VID 0x${hex43(c.device.vendorId)} PID 0x${hex43(c.device.productId)}${c.sim ? " (SIMULATED)" : ""}`,
       !c ? "" : c.transport === "bluetooth" ? `Link stats ${JSON.stringify(c.link.stats)} firmware=${c.btr.firmware?.join(".") ?? "?"} typeByte=${c.btr.withType}` : `Link stats ${JSON.stringify(c.link.stats)} framing=${c.link.framing} prefix=[${c.link.prefix.join(",")}] usesReportIds=${c.link.usesReportIds} seqEcho=${c.link.seqEcho} reportId=${c.link.reportId} padTo=${c.link.padTo}`,
       `Model ${state.model}  allowWrites=${$("allowWrites").checked}`,
       "----"
@@ -3193,6 +3383,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     $("btnReadLive").disabled = !connected || state.busy;
     if (state.conn?.btr.readsSlotsDirectly) $("btnReadSlots").disabled = !connected || state.busy || !!state.info?.noAnswer;
     $("btnConnect").hidden = connected;
+    $("btnConnectBle").hidden = connected;
     $("btnConnectUsb").hidden = connected;
     $("btnDemo").hidden = connected;
     $("btnDisconnect").hidden = !connected;
@@ -3235,12 +3426,11 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     const c = state.conn;
     if (!c) return "Not connected";
     if (c.link.closed) return "Disconnected";
-    return `${c.sim ? "Demo: " : ""}${devName(c.device)}${c.transport === "bluetooth" ? " (Bluetooth)" : " (USB)"}`;
+    return `${c.sim ? "Demo: " : ""}${devName(c.device)}${c.transport === "bluetooth" ? "" : " (USB)"}`;
   }
-  if (!("bluetooth" in navigator)) {
-    $("noBt").hidden = false;
-    $("btnConnect").disabled = true;
-  }
+  if (!("serial" in navigator) && !("bluetooth" in navigator)) $("noBt").hidden = false;
+  if (!("serial" in navigator)) $("btnConnect").disabled = true;
+  if (!("bluetooth" in navigator)) $("btnConnectBle").disabled = true;
   if (!("hid" in navigator)) {
     $("btnConnectUsb").disabled = true;
   } else {
@@ -3265,7 +3455,39 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       }, 600);
     });
   }
+  var SERIAL_HELP = `<p>Pick the BTR15's Bluetooth serial port. It may be listed as <b>FIIO BTR15</b> or as <b>Standard Serial over Bluetooth link (COM\u2026)</b>. Windows usually makes two of those; the right one is the <b>outgoing</b> port. If the page gets no answer, connect again and try the other one.</p>
+  <p>If no such port is listed:</p>
+  <ol>
+    <li>Make sure the BTR15 is paired in Windows (<b>Settings \u2192 Bluetooth &amp; devices</b>).</li>
+    <li>Open <b>Settings \u2192 Bluetooth &amp; devices \u2192 Devices \u2192 More Bluetooth settings</b>, tab <b>COM Ports</b>. Press <b>Add\u2026</b>, choose <b>Outgoing</b>, pick the BTR15 and its <b>Serial Port</b> service, then OK. The tab also shows which COM number is the outgoing one.</li>
+    <li>Press <b>Connect BTR15</b> again.</li>
+  </ol>`;
   $("btnConnect").onclick = async () => {
+    let port;
+    try {
+      port = await navigator.serial.requestPort({ allowedBluetoothServiceClassIds: [SPP_UUID] });
+    } catch (e) {
+      if (e instanceof TypeError) {
+        try {
+          port = await navigator.serial.requestPort();
+        } catch (e2) {
+          log.info(`No serial port chosen (${e2.message}).`);
+          await alertDlg("No port chosen", SERIAL_HELP);
+          return;
+        }
+      } else if (e.name === "NotFoundError") {
+        log.info(`No serial port chosen (${e.message}).`);
+        await alertDlg("Connecting to the BTR15", SERIAL_HELP);
+        return;
+      } else {
+        log.error(`Serial port chooser failed: ${e.name}: ${e.message}`);
+        await alertDlg("Serial ports unavailable", `<p>${esc(e.message)}</p>`);
+        return;
+      }
+    }
+    await openGaia(new SppLink(port, { log, profile: BTR15_BT }), port);
+  };
+  $("btnConnectBle").onclick = async () => {
     let device;
     try {
       device = await navigator.bluetooth.requestDevice({
@@ -3294,29 +3516,29 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         return;
       }
     }
-    await openBle(device);
+    await openGaia(new BleLink(device, { log, profile: BTR15_BT }), device);
   };
   $("btnDemo").onclick = async () => {
-    log.info("Connecting to the SIMULATED BTR15 over simulated Bluetooth (nothing here touches real hardware).");
-    await openBle(new SimulatedBtr15Ble(), { sim: true });
+    log.info("Connecting to the SIMULATED BTR15 over a simulated Bluetooth serial link (nothing here touches real hardware).");
+    const sim = new SimulatedBtr15Spp();
+    await openGaia(new SppLink(sim, { log, profile: { ...BTR15_BT, presetSwitchDelayMs: 150 } }), sim, { sim: true });
   };
-  async function openBle(device, { sim = false } = {}) {
+  async function openGaia(link, device, { sim = false } = {}) {
     if (state.conn) {
       try {
         await state.conn.link.close();
       } catch {
       }
     }
-    const profile = sim ? { ...BTR15_BT, presetSwitchDelayMs: 150 } : BTR15_BT;
-    const link = new BleLink(device, { log, profile });
+    const profile = link.profile;
     try {
       await link.open();
     } catch (e) {
-      log.error(`Could not connect over Bluetooth: ${e.message}`);
-      await alertDlg("Could not connect over Bluetooth", `<p>${esc(e.message)}</p><p>Close FiiO Control on your phone (or turn the phone's Bluetooth off for a moment), make sure the BTR15 is on, and try again.</p>`);
+      log.error(`Could not connect: ${e.message}`);
+      await alertDlg("Could not connect", `<p>${esc(e.message)}</p>${link.transport === "bluetooth-serial" ? '<p>Make sure the BTR15 is on and paired with Windows, and that FiiO Control on the phone is closed. If you picked a "Standard Serial over Bluetooth link" port, try the other one.</p>' : "<p>Close FiiO Control on your phone (or turn the phone's Bluetooth off for a moment), make sure the BTR15 is on, and try again.</p>"}`);
       return;
     }
-    const isBtr15 = sim || /BTR15/i.test(device.name ?? "");
+    const isBtr15 = sim || link.transport === "bluetooth-serial" || /BTR15/i.test(device.name ?? "");
     const btr = new Btr15Bt(link, { profile, log });
     state.conn = { device, link, btr, sim, isBtr15, transport: "bluetooth" };
     state.slots = {};
@@ -3432,7 +3654,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
           <p class="small">If Windows showed a pairing prompt while the page was connecting, accepting it and connecting again may be enough.</p>`);
           return;
         }
-        await alertDlg("The BTR15 did not answer", state.conn.transport === "bluetooth" ? `<p>The BTR15 accepted the Bluetooth connection but did not answer the version request. Nothing was written.</p><p>Please press <b>Copy log</b> and paste it into the chat. Closing FiiO Control on your phone may help.</p>` : `<p>The page asked for the band count in every encoding it knows and got no reply. Nothing was written.</p>
+        await alertDlg("The BTR15 did not answer", state.conn.link.transport === "bluetooth-serial" ? `<p>The serial port opened but nothing answered the version request. Nothing was written.</p><p>If you picked a "Standard Serial over Bluetooth link" port, disconnect and try the other one (the <b>outgoing</b> port). Otherwise press <b>Copy log</b> and paste it into the chat.</p>` : state.conn.transport === "bluetooth" ? `<p>The BTR15 accepted the Bluetooth connection but did not answer the version request. Nothing was written.</p><p>Please press <b>Copy log</b> and paste it into the chat. Closing FiiO Control on your phone may help.</p>` : `<p>The page asked for the band count in every encoding it knows and got no reply. Nothing was written.</p>
         <p>Please press <b>Copy log</b> and paste it into the chat. Also check that FiiO Control and fiiocontrol.fiio.com are closed, then try unplugging and reconnecting.</p>`);
         return;
       }
@@ -3460,7 +3682,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       $("slotCards").replaceChildren();
       return;
     }
-    $("fModel").textContent = `${devName(c.device)} (${c.transport === "bluetooth" ? "Bluetooth" : "USB"})`;
+    $("fModel").textContent = devName(c.device);
     $("fFirmware").textContent = info?.firmware?.join(".") ?? "\u2013";
     $("fSwitch").textContent = info?.eqSwitch == null ? "\u2013" : info.eqSwitch ? "On" : "Off";
     $("fPreset").textContent = info?.preset == null ? "\u2013" : `${sname(info.preset)} (${info.preset})`;
@@ -3538,7 +3760,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
   function deviceKey() {
     const c = state.conn;
     if (!c) return "none";
-    if (c.transport === "bluetooth") return `${c.sim ? "simble" : "ble"}:${c.device.id ?? devName(c.device)}`;
+    if (c.transport === "bluetooth") return c.sim ? "sim-bt" : "btr15-bluetooth";
     return `${c.sim ? "sim" : "usb"}:${hex43(c.device.vendorId)}:${hex43(c.device.productId)}`;
   }
   function logSlot(id, s) {

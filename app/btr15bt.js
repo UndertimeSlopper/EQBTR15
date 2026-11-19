@@ -99,7 +99,7 @@ export class Btr15Bt extends Btr15 {
   }
 
   async identify() {
-    const info = { transport: 'bluetooth', encoding: 'Bluetooth (GAIA over BLE)' };
+    const info = { transport: 'bluetooth', encoding: this.link.transport === 'bluetooth-serial' ? 'Bluetooth serial (GAIA over SPP)' : 'Bluetooth LE (GAIA over GATT)' };
     const tryRead = async (key, fn) => {
       try { info[key] = await fn(); } catch (e) { info[key] = null; info.errors = [...(info.errors ?? []), `${key}: ${e.message}`]; }
     };

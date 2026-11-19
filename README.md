@@ -5,7 +5,9 @@ reads them back and checks they were stored as written. It also turns EQ files
 (AutoEQ GraphicEQ and ParametricEQ, Equalizer APO, CSV) into presets the BTR15 can
 actually hold.
 
-It runs in Chrome or Edge on a desktop with Bluetooth (Web Bluetooth). There is
+It runs in Chrome or Edge on a Windows PC with Bluetooth. It reaches the BTR15
+through its Bluetooth serial port (Web Serial), the link FiiO Control uses while
+the BTR15 plays audio; Bluetooth LE (Web Bluetooth) is a second route. There is
 nothing to install.
 
 > Not affiliated with FiiO. The protocol comes from studying FiiO Control for Android
@@ -20,8 +22,8 @@ nothing to install.
   and open it in Chrome or Edge. WebHID works from a local file.
 * **From a checkout:** `npm run serve`, then open http://localhost:8080/.
 
-1. Turn the BTR15 on, close FiiO Control on your phone, and press **Connect BTR15**.
-   Pick it in the Bluetooth list. Connecting only reads.
+1. Pair the BTR15 with Windows, close FiiO Control on your phone, press **Connect BTR15**
+   and pick the BTR15's Bluetooth serial port. Connecting only reads.
 2. Load an EQ file, or press **Load FT1 example**, then press **Fit filters to curve**.
    Or type filters into the table by hand.
 3. Tick **Allow writing to the device**, choose USER1–3 and press **Save and verify**.
@@ -80,7 +82,7 @@ index.html          the page
 app/main.js         UI wiring
 app/protocol.js     USB frame format, CRC, command allowlist, BTR15 USB tables
 app/gaia.js         Bluetooth protocol: GAIA framing, command allowlist, BTR15 tables
-app/ble.js          Web Bluetooth transport: queue, reply matching, retries, log
+app/ble.js          GAIA links: Web Bluetooth (LE) and Web Serial (Bluetooth serial)
 app/btr15bt.js      BTR15 operations over Bluetooth
 app/device.js       WebHID transport (experimental USB path)
 app/btr15.js        read / backup / write / save / verify sequences

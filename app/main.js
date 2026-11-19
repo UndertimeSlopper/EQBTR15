@@ -7,10 +7,10 @@ import { fitPeq, fitStats, quantizeSent, equalizationCurve, BTR15_LIMITS } from 
 import { BTR15, FIIO_VENDOR_ID, slotName } from './protocol.js';
 import { FiioLink, pickControlInterface, summarizeCollections, hasOutputReport } from './device.js';
 import { Btr15, toDeviceBands, fmtBand, compareValues } from './btr15.js';
-import { SimulatedBtr15Ble } from './sim.js';
-import { BleLink } from './ble.js';
+import { SimulatedBtr15Spp } from './sim.js';
+import { BleLink, SppLink } from './ble.js';
 import { Btr15Bt } from './btr15bt.js';
-import { BTR15_BT, GAIA_SERVICE, BT } from './gaia.js';
+import { BTR15_BT, GAIA_SERVICE, BT, SPP_UUID } from './gaia.js';
 import { TrafficLog } from './log.js';
 import { ResponseGraph } from './graph.js';
 import { LISTEN_TESTS, NoiseEngine } from './listen.js';
@@ -24,7 +24,7 @@ const grid = new FreqGrid({ fmin: 20, fmax: 20000, pointsPerOctave: 48 });
 // The active device's profile (slot numbers differ between USB and Bluetooth).
 const prof = () => state.conn?.btr.profile ?? BTR15_BT;
 const sname = (id) => slotName(id, prof());
-const devName = (d) => d?.productName ?? d?.name ?? 'device';
+const devName = (d) => d?.productName ?? d?.name ?? (d?.getInfo ? 'FiiO BTR15 (Bluetooth serial)' : 'device');
 
 const state = {
   conn: null,        // { device, link, btr, sim, isBtr15 }
@@ -60,7 +60,7 @@ function logHeader() {
     `BTR15 PEQ Writer ${APP_VERSION}  ${location.href}`,
     `Time ${new Date().toISOString()}  ${navigator.userAgent}`,
     !c ? 'Device: none' : c.transport === 'bluetooth'
-      ? `Device "${devName(c.device)}" over Bluetooth${c.sim ? ' (SIMULATED)' : ''}`
+      ? `Device "${devName(c.device)}" over ${c.link.transport === 'bluetooth-serial' ? `Bluetooth serial ${JSON.stringify(c.device.getInfo?.() ?? {})}` : 'Bluetooth LE'}${c.sim ? ' (SIMULATED)' : ''}`
       : `Device "${devName(c.device)}" over USB VID 0x${hex4(c.device.vendorId)} PID 0x${hex4(c.device.productId)}${c.sim ? ' (SIMULATED)' : ''}`,
     !c ? '' : c.transport === 'bluetooth'
       ? `Link stats ${JSON.stringify(c.link.stats)} firmware=${c.btr.firmware?.join('.') ?? '?'} typeByte=${c.btr.withType}`
@@ -92,6 +92,7 @@ function updateControls() {
   $('btnReadLive').disabled = !connected || state.busy;
   if (state.conn?.btr.readsSlotsDirectly) $('btnReadSlots').disabled = !connected || state.busy || !!state.info?.noAnswer;
   $('btnConnect').hidden = connected;
+  $('btnConnectBle').hidden = connected;
   $('btnConnectUsb').hidden = connected;
   $('btnDemo').hidden = connected;
   $('btnDisconnect').hidden = !connected;
@@ -137,14 +138,13 @@ function connLabel() {
   const c = state.conn;
   if (!c) return 'Not connected';
   if (c.link.closed) return 'Disconnected';
-  return `${c.sim ? 'Demo: ' : ''}${devName(c.device)}${c.transport === 'bluetooth' ? ' (Bluetooth)' : ' (USB)'}`;
+  return `${c.sim ? 'Demo: ' : ''}${devName(c.device)}${c.transport === 'bluetooth' ? '' : ' (USB)'}`;
 }
 
 // ── Connecting ──────────────────────────────────────────────────────────────
-if (!('bluetooth' in navigator)) {
-  $('noBt').hidden = false;
-  $('btnConnect').disabled = true;
-}
+if (!('serial' in navigator) && !('bluetooth' in navigator)) $('noBt').hidden = false;
+if (!('serial' in navigator)) $('btnConnect').disabled = true;
+if (!('bluetooth' in navigator)) $('btnConnectBle').disabled = true;
 if (!('hid' in navigator)) {
   $('btnConnectUsb').disabled = true;
 } else {
@@ -171,8 +171,37 @@ if (!('hid' in navigator)) {
   });
 }
 
-// ── Bluetooth (the way FiiO Control talks to the BTR15) ─────────────────────
+// ── Bluetooth serial: what FiiO Control uses while the BTR15 plays audio ────
+const SERIAL_HELP = `<p>Pick the BTR15's Bluetooth serial port. It may be listed as <b>FIIO BTR15</b> or as <b>Standard Serial over Bluetooth link (COM…)</b>. Windows usually makes two of those; the right one is the <b>outgoing</b> port. If the page gets no answer, connect again and try the other one.</p>
+  <p>If no such port is listed:</p>
+  <ol>
+    <li>Make sure the BTR15 is paired in Windows (<b>Settings → Bluetooth &amp; devices</b>).</li>
+    <li>Open <b>Settings → Bluetooth &amp; devices → Devices → More Bluetooth settings</b>, tab <b>COM Ports</b>. Press <b>Add…</b>, choose <b>Outgoing</b>, pick the BTR15 and its <b>Serial Port</b> service, then OK. The tab also shows which COM number is the outgoing one.</li>
+    <li>Press <b>Connect BTR15</b> again.</li>
+  </ol>`;
+
 $('btnConnect').onclick = async () => {
+  let port;
+  try {
+    port = await navigator.serial.requestPort({ allowedBluetoothServiceClassIds: [SPP_UUID] });
+  } catch (e) {
+    if (e instanceof TypeError) {
+      try { port = await navigator.serial.requestPort(); } catch (e2) { log.info(`No serial port chosen (${e2.message}).`); await alertDlg('No port chosen', SERIAL_HELP); return; }
+    } else if (e.name === 'NotFoundError') {
+      log.info(`No serial port chosen (${e.message}).`);
+      await alertDlg('Connecting to the BTR15', SERIAL_HELP);
+      return;
+    } else {
+      log.error(`Serial port chooser failed: ${e.name}: ${e.message}`);
+      await alertDlg('Serial ports unavailable', `<p>${esc(e.message)}</p>`);
+      return;
+    }
+  }
+  await openGaia(new SppLink(port, { log, profile: BTR15_BT }), port);
+};
+
+// ── Bluetooth LE (FiiO's fallback route; needs an LE pairing on Windows) ────
+$('btnConnectBle').onclick = async () => {
   let device;
   try {
     device = await navigator.bluetooth.requestDevice({
@@ -198,26 +227,29 @@ $('btnConnect').onclick = async () => {
       return;
     }
   }
-  await openBle(device);
+  await openGaia(new BleLink(device, { log, profile: BTR15_BT }), device);
 };
 
 $('btnDemo').onclick = async () => {
-  log.info('Connecting to the SIMULATED BTR15 over simulated Bluetooth (nothing here touches real hardware).');
-  await openBle(new SimulatedBtr15Ble(), { sim: true });
+  log.info('Connecting to the SIMULATED BTR15 over a simulated Bluetooth serial link (nothing here touches real hardware).');
+  const sim = new SimulatedBtr15Spp();
+  await openGaia(new SppLink(sim, { log, profile: { ...BTR15_BT, presetSwitchDelayMs: 150 } }), sim, { sim: true });
 };
 
-async function openBle(device, { sim = false } = {}) {
+// Open a GAIA link (serial or LE) and identify the BTR15.
+async function openGaia(link, device, { sim = false } = {}) {
   if (state.conn) { try { await state.conn.link.close(); } catch { /* ignore */ } }
-  const profile = sim ? { ...BTR15_BT, presetSwitchDelayMs: 150 } : BTR15_BT;
-  const link = new BleLink(device, { log, profile });
+  const profile = link.profile;
   try {
     await link.open();
   } catch (e) {
-    log.error(`Could not connect over Bluetooth: ${e.message}`);
-    await alertDlg('Could not connect over Bluetooth', `<p>${esc(e.message)}</p><p>Close FiiO Control on your phone (or turn the phone's Bluetooth off for a moment), make sure the BTR15 is on, and try again.</p>`);
+    log.error(`Could not connect: ${e.message}`);
+    await alertDlg('Could not connect', `<p>${esc(e.message)}</p>${link.transport === 'bluetooth-serial'
+      ? '<p>Make sure the BTR15 is on and paired with Windows, and that FiiO Control on the phone is closed. If you picked a "Standard Serial over Bluetooth link" port, try the other one.</p>'
+      : '<p>Close FiiO Control on your phone (or turn the phone\'s Bluetooth off for a moment), make sure the BTR15 is on, and try again.</p>'}`);
     return;
   }
-  const isBtr15 = sim || /BTR15/i.test(device.name ?? '');
+  const isBtr15 = sim || link.transport === 'bluetooth-serial' || /BTR15/i.test(device.name ?? '');
   const btr = new Btr15Bt(link, { profile, log });
   state.conn = { device, link, btr, sim, isBtr15, transport: 'bluetooth' };
   state.slots = {};
@@ -324,7 +356,9 @@ async function identify(auto = false) {
           <p class="small">If Windows showed a pairing prompt while the page was connecting, accepting it and connecting again may be enough.</p>`);
         return;
       }
-      await alertDlg('The BTR15 did not answer', state.conn.transport === 'bluetooth'
+      await alertDlg('The BTR15 did not answer', state.conn.link.transport === 'bluetooth-serial'
+        ? `<p>The serial port opened but nothing answered the version request. Nothing was written.</p><p>If you picked a "Standard Serial over Bluetooth link" port, disconnect and try the other one (the <b>outgoing</b> port). Otherwise press <b>Copy log</b> and paste it into the chat.</p>`
+        : state.conn.transport === 'bluetooth'
         ? `<p>The BTR15 accepted the Bluetooth connection but did not answer the version request. Nothing was written.</p><p>Please press <b>Copy log</b> and paste it into the chat. Closing FiiO Control on your phone may help.</p>`
         : `<p>The page asked for the band count in every encoding it knows and got no reply. Nothing was written.</p>
         <p>Please press <b>Copy log</b> and paste it into the chat. Also check that FiiO Control and fiiocontrol.fiio.com are closed, then try unplugging and reconnecting.</p>`);
@@ -353,7 +387,7 @@ function renderDevice() {
   $('devEmpty').hidden = !!c;
   $('devInfo').hidden = !c;
   if (!c) { $('slotCards').replaceChildren(); return; }
-  $('fModel').textContent = `${devName(c.device)} (${c.transport === 'bluetooth' ? 'Bluetooth' : 'USB'})`;
+  $('fModel').textContent = devName(c.device);
   $('fFirmware').textContent = info?.firmware?.join('.') ?? '–';
   $('fSwitch').textContent = info?.eqSwitch == null ? '–' : info.eqSwitch ? 'On' : 'Off';
   $('fPreset').textContent = info?.preset == null ? '–' : `${sname(info.preset)} (${info.preset})`;
@@ -435,7 +469,8 @@ function c0() { return !!state.conn; }
 function deviceKey() {
   const c = state.conn;
   if (!c) return 'none';
-  if (c.transport === 'bluetooth') return `${c.sim ? 'simble' : 'ble'}:${c.device.id ?? devName(c.device)}`;
+  // Both Bluetooth routes reach the same presets, so they share one key.
+  if (c.transport === 'bluetooth') return c.sim ? 'sim-bt' : 'btr15-bluetooth';
   return `${c.sim ? 'sim' : 'usb'}:${hex4(c.device.vendorId)}:${hex4(c.device.productId)}`;
 }
 

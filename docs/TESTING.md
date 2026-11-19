@@ -4,27 +4,22 @@ Run these in order in Chrome or Edge on Windows, with Bluetooth on. After each t
 press **Copy log** and paste it into the chat. Each test only relies on what the
 previous one confirmed.
 
-Before you start, close FiiO Control on your phone. Its Bluetooth control connection
-can keep the BTR15 busy. If the BTR15 still won't connect, turn the phone's
-Bluetooth off for a moment.
+Before you start:
 
-The BTR15 only accepts commands from a device it is paired with. If the page reports
-"Authentication failed", pair the BTR15 with Windows first: put it in pairing mode,
-then use Settings → Bluetooth & devices → Add device → Bluetooth. If it is already
-listed there, remove it and pair it again.
+* Pair the BTR15 with Windows (**Settings → Bluetooth & devices → Add device → Bluetooth**, with the BTR15 in pairing mode). If it was paired before and misbehaves, remove it and pair it again.
+* Close FiiO Control on your phone.
 
 ## Test 1: read only (read commands only)
 
-1. Open the page and press **Connect BTR15**. Pick the BTR15 in the Bluetooth list.
-   If Windows asks to pair, accept. If the BTR15 isn't listed, cancel; the page then
-   offers to show every nearby Bluetooth device.
+1. Open the page and press **Connect BTR15**. Chrome/Edge lists serial ports. Pick the BTR15's Bluetooth serial port: it may be called **FIIO BTR15** or **Standard Serial over Bluetooth link (COM…)**. Windows usually creates two of the latter; the right one is the **outgoing** one. If the page gets no answer, connect again and pick the other one.
+   * If no such port is listed: **Settings → Bluetooth & devices → Devices → More Bluetooth settings → COM Ports → Add… → Outgoing**, pick the BTR15 and its **Serial Port** service. That tab also shows which COM number is outgoing.
 2. Leave **Allow writing to the device** unticked.
-3. Check the Device panel: firmware (should be 4.4), EQ switch, active preset, and
-   the bands and global gain of the active preset if it is a user preset.
-4. Press **Read USER1–3**. Over Bluetooth this reads all three user presets without
-   switching presets.
+3. Check the Device panel: firmware (should be 4.4), EQ switch, active preset, and the bands and global gain of the active preset if it is a user preset.
+4. Press **Read USER1–3**. This reads all three user presets without switching presets.
 5. Compare what the page shows with FiiO Control for one of the user presets.
 6. Copy the log.
+
+(**Bluetooth LE** is a second route, FiiO's fallback. On Windows it needs an LE pairing that the normal pairing may not create, and it failed that way in the first test.)
 
 ## Test 2: the first write
 

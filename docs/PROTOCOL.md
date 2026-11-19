@@ -14,7 +14,22 @@ nothing, and FiiO's own web page cannot use it either.
 Source: FiiO Control for Android, decompiled with jadx for study (2026-11-19). No
 FiiO code is copied.
 
-### Transport
+### Transports
+
+FiiO Control picks the Bluetooth transport by whether the BTR15 is already connected
+for audio (the usual case while listening):
+
+* **Connected:** classic Bluetooth. It opens an insecure RFCOMM socket to the standard serial-port UUID `00001101-0000-1000-8000-00805f9b34fb` (fallback: RFCOMM channel 1) and speaks GAIA v3 serial framing:
+  * request `FF 03 00 LEN 00 1D CC HH LL [data]`, where LEN = data length + 1;
+  * reply `FF 03 00 LEN 00 1D xx HH ST LL [data]`; the app skips 7 bytes, then reads HH, the status ST, and LL;
+  * a packet is 8 + LEN bytes, plus a checksum byte if flags bit 0 is set.
+
+  On Windows a paired device's serial service appears as a "Standard Serial over Bluetooth link" COM port, which Web Serial can open. This is the page's main **Connect BTR15** route.
+* **Not connected:** Qualcomm GAIA over BLE GATT (below), with on-demand bonding in Qualcomm's BLE library.
+
+The FiiO command numbers and payloads are the same on both transports.
+
+#### BLE GATT
 
 * Qualcomm GAIA over BLE GATT. Service `00001100-d102-11e1-9b23-00025b00a5a5`. Commands are written with response to `00001101-…`; replies arrive as notifications on `00001102-…`.
 * Request: `00 0A 04 HH LL [data]`. FiiO's 16-bit command `0xHHLL` rides as GAIA command `0x04HH`, with `LL` as the first payload byte.
@@ -44,6 +59,7 @@ FiiO code is copied.
 
 * Web Bluetooth works from a local `file://` page. The BTR15 advertises as **`FIIO BTR15`**, accepts a GATT connection and has the GAIA service and characteristics. The command characteristic supports write with response.
 * The first command written was refused with **"Authentication failed"** while the PC was not paired with the BTR15: the GAIA characteristics require a paired (encrypted) link. After that the link dropped and Chrome reported "Connection already in progress" for further writes. The page now stops at the first refusal and explains how to pair.
+* After pairing through Windows Settings (classic pairing), every write failed at once with "Connection already in progress". The LE link apparently still lacks the security the GAIA characteristics need. This is why the page now uses the classic serial route first, the one FiiO Control uses while the BTR15 is connected.
 
 ## USB HID (reference; not working on the BTR15)
 

@@ -245,3 +245,50 @@ export class SimulatedBtr15Ble extends EventTarget {
 }
 
 const BTR15_BT_FREQS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+
+// ── Simulated BTR15 over a Bluetooth serial port (Web Serial SerialPort) ────
+export class SimulatedBtr15Spp extends SimulatedBtr15Ble {
+  constructor(options = {}) {
+    super({ splitReplies: true, ...options });
+    this.name = 'FiiO BTR15 (simulated serial)';
+    this.readable = null;
+    this.writable = null;
+  }
+
+  getInfo() { return { bluetoothServiceClassId: '00001101-0000-1000-8000-00805f9b34fb', simulated: true }; }
+
+  async open() {
+    this.connected = true;
+    const sim = this;
+    this.readable = new ReadableStream({ start(c) { sim._ctl = c; } });
+    this.writable = new WritableStream({
+      write(chunk) {
+        const b = Uint8Array.from(chunk);
+        if (b[0] !== 0xFF || b.length < 9) return;
+        // Convert the serial request into the BLE form the shared handler uses.
+        sim._handle(Uint8Array.from([0x00, 0x0A, 0x04, b[7], b[8], ...b.slice(9)]));
+      },
+    });
+    if (this.options.emitNoise) this._ctl.enqueue(Uint8Array.from([0x00, 0x12]));
+  }
+
+  async close() {
+    this.connected = false;
+    try { this._ctl?.close(); } catch { /* already closed */ }
+  }
+
+  _reply(cmd, status, data) {
+    this.replyCount++;
+    if (this.options.dropReplyEvery && this.replyCount % this.options.dropReplyEvery === 0) return;
+    const bytes = Uint8Array.from([0xFF, 0x03, 0x00, data.length + 2, 0x00, 0x1D, 0xCD, (cmd >> 8) & 0xFF, status, cmd & 0xFF, ...data]);
+    setTimeout(() => {
+      if (!this.connected) return;
+      if (this.options.splitReplies && bytes.length > 4) {
+        this._ctl.enqueue(bytes.slice(0, 3));
+        this._ctl.enqueue(bytes.slice(3));
+      } else {
+        this._ctl.enqueue(bytes);
+      }
+    }, this.options.latencyMs);
+  }
+}

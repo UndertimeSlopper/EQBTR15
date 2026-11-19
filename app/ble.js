@@ -5,7 +5,7 @@
 // command and content (band index, preset index), timeouts with retries,
 // everything logged, nothing substituted on failure.
 
-import { GAIA_SERVICE, GAIA_COMMAND, GAIA_RESPONSE, encodeGaia, decodeGaia, describeGaia, isSetCommand } from './gaia.js';
+import { GAIA_SERVICE, GAIA_COMMAND, GAIA_RESPONSE, encodeGaia, decodeGaia, describeGaia, isSetCommand, encodeGaiaSpp, decodeGaiaSpp, GaiaStreamParser } from './gaia.js';
 import { LinkError, sleep } from './device.js';
 import { slotName } from './protocol.js';
 
@@ -25,6 +25,8 @@ export class BleLink {
     this.stats = { tx: 0, frames: 0, timeouts: 0, unsolicited: 0, badStatus: 0, unparsed: 0 };
     this._onNotify = (ev) => this._handleNotify(ev);
     this._onGone = () => this._gone();
+    this.encode = encodeGaia;
+    this.decode = decodeGaia;
   }
 
   async open() {
@@ -83,11 +85,14 @@ export class BleLink {
 
   _handleNotify(ev) {
     const v = ev.target.value;
-    const data = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
-    const f = decodeGaia(data);
+    this._handlePacket(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+  }
+
+  _handlePacket(data) {
+    const f = this.decode(data);
     if (!f.valid || f.kind !== 'reply') {
       this.stats.unparsed++;
-      this.log?.rx(`notification not understood (${f.error ?? f.kind})`, data);
+      this.log?.rx(`packet not understood (${f.error ?? f.kind})`, data);
       return;
     }
     this.stats.frames++;
@@ -189,8 +194,8 @@ export class BleLink {
     return this._enqueue(async () => {
       let last;
       for (let attempt = 0; attempt <= retries; attempt++) {
-        const bytes = encodeGaia(cmd, data);
-        const f = decodeGaia(bytes);
+        const bytes = this.encode(cmd, data);
+        const f = this.decode(bytes);
         const wait = this._wait((r) => r.cmd === cmd && (r.status !== 0 || !match || match(r.data)), timeoutMs);
         try {
           await this._write(bytes, this._describe(f) + (attempt ? ` (retry ${attempt})` : ''));
@@ -215,8 +220,8 @@ export class BleLink {
   set(cmd, data = [], { listenMs = 1200 } = {}) {
     if (!isSetCommand(cmd)) throw new Error('set() needs a write command');
     return this._enqueue(async () => {
-      const bytes = encodeGaia(cmd, data);
-      const f = decodeGaia(bytes);
+      const bytes = this.encode(cmd, data);
+      const f = this.decode(bytes);
       const wait = this._wait((r) => r.cmd === cmd, listenMs);
       try {
         await this._write(bytes, this._describe(f));
@@ -234,4 +239,90 @@ export class BleLink {
   }
 
   idle() { return this.queue; }
+}
+
+// Classic Bluetooth: the same GAIA commands over a serial port (SPP/RFCOMM),
+// through Web Serial. On Windows the BTR15's serial service appears as a
+// "Standard Serial over Bluetooth link" COM port once it is paired.
+export class SppLink extends BleLink {
+  constructor(port, opts = {}) {
+    super(port, { timeoutMs: 2000, ...opts });
+    this.port = port;
+    this.transport = 'bluetooth-serial';
+    this.encode = encodeGaiaSpp;
+    this.decode = decodeGaiaSpp;
+    this.parser = new GaiaStreamParser();
+  }
+
+  async open() {
+    const info = this.port.getInfo?.() ?? {};
+    this.log?.info(`Opening serial port ${JSON.stringify(info)}…`);
+    try {
+      await this.port.open({ baudRate: 115200 });
+    } catch (e) {
+      throw new LinkError(`Could not open the serial port: ${e.message}`, 'open');
+    }
+    this.writer = this.port.writable.getWriter();
+    this.closed = false;
+    this._readLoop();
+    this.log?.info('Serial port open.');
+  }
+
+  async _readLoop() {
+    try {
+      this.reader = this.port.readable.getReader();
+      for (;;) {
+        const { value, done } = await this.reader.read();
+        if (done) break;
+        if (!value?.length) continue;
+        const { packets, junk } = this.parser.push(value);
+        if (junk) { this.stats.unparsed++; this.log?.rx('bytes outside a GAIA packet', junk); }
+        for (const pkt of packets) this._handlePacket(pkt);
+        clearTimeout(this._flushTimer);
+        if (this.parser.buf.length) {
+          this._flushTimer = setTimeout(() => {
+            const rest = this.parser.flush();
+            if (rest) { this.stats.unparsed++; this.log?.rx('incomplete packet (length did not match)', rest); }
+          }, 300);
+        }
+      }
+    } catch (e) {
+      if (!this.closed) this.log?.warn(`Serial read stopped: ${e.message}`);
+    } finally {
+      try { this.reader?.releaseLock(); } catch { /* ignore */ }
+      if (!this.closed) this._gone();
+    }
+  }
+
+  async _rawWrite(bytes) {
+    await this.writer.write(bytes);
+  }
+
+  async _write(bytes, text) {
+    if (this.closed) throw new LinkError('Not connected', 'closed');
+    this.log?.tx(text, bytes);
+    this.stats.tx++;
+    try {
+      await this._rawWrite(bytes);
+    } catch (e) {
+      throw new LinkError(`Serial write failed: ${e.message ?? e}`, 'send');
+    }
+  }
+
+  async close() {
+    this.closed = true;
+    this._failAll(new LinkError('Connection closed', 'closed'));
+    clearTimeout(this._flushTimer);
+    try { await this.reader?.cancel(); } catch { /* ignore */ }
+    try { this.writer?.releaseLock(); } catch { /* ignore */ }
+    try { await this.port.close(); } catch { /* ignore */ }
+  }
+
+  _gone() {
+    if (this.closed && !this.waiters.length) return;
+    this.closed = true;
+    this.log?.warn('Serial (Bluetooth) connection lost.');
+    this._failAll(new LinkError('Device disconnected', 'disconnected'));
+    this.onDisconnect?.();
+  }
 }

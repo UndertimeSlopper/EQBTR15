@@ -16,7 +16,8 @@
   </div>
   <div class="conn">
     <span id="connStatus" class="chip">Not connected</span>
-    <button id="btnConnect" class="primary">Connect BTR15</button>
+    <button id="btnConnect" class="primary" title="Bluetooth serial link, as FiiO Control uses while the BTR15 plays audio">Connect BTR15</button>
+    <button id="btnConnectBle" title="Bluetooth Low Energy: FiiO Control's fallback route; Windows may need a separate pairing for it">Bluetooth LE</button>
     <button id="btnConnectUsb" title="Experimental: no FiiO software answers on the BTR15's USB control interface yet">USB (experimental)</button>
     <button id="btnDemo" title="A simulated BTR15 inside the page, for trying things out">Demo device</button>
     <button id="btnDisconnect" hidden>Disconnect</button>
@@ -24,7 +25,7 @@
 </header>
 
 <div id="noBt" class="banner warn" hidden>
-  This browser has no Web Bluetooth. Use Chrome or Edge on a desktop, from an https:// address or a local file.
+  This browser has neither Web Serial nor Web Bluetooth. Use Chrome or Edge on a desktop, from an https:// address or a local file.
   The editor, fitting and exports still work without a device.
 </div>
 
@@ -37,7 +38,7 @@
         <input type="checkbox" id="allowWrites"> <span>Allow writing to the device</span>
       </label>
     </div>
-    <div id="devEmpty" class="muted">Turn the BTR15 on, close FiiO Control on your phone, then press <b>Connect BTR15</b> and pick it in the Bluetooth list. Connecting only reads. (FiiO's own app also talks to the BTR15 over Bluetooth; its USB control interface does not answer yet.)</div>
+    <div id="devEmpty" class="muted">Pair the BTR15 with Windows, close FiiO Control on your phone, then press <b>Connect BTR15</b> and pick its Bluetooth serial port. Connecting only reads. This is the same Bluetooth link FiiO Control uses; the BTR15's USB control interface does not answer.</div>
     <div id="devInfo" hidden>
       <dl class="facts">
         <div><dt>Model</dt><dd id="fModel">–</dd></div>

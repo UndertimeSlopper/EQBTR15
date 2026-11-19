@@ -158,3 +158,55 @@ export const BTR15_BT = {
 };
 
 function hex4(v) { return v.toString(16).toUpperCase().padStart(4, '0'); }
+
+// ── Classic Bluetooth: GAIA over the serial port profile (RFCOMM) ───────────
+// FiiO Control uses this when the BTR15 is already connected for audio,
+// through an insecure RFCOMM socket to the standard SPP UUID. On Windows a
+// paired device's SPP shows up as a "Standard Serial over Bluetooth link"
+// COM port, which Web Serial can open.
+//
+//   request  FF 03 00 LEN 00 1D CC HH LL [data]      LEN = data length + 1
+//   reply    FF 03 00 LEN 00 1D xx HH ST LL [data]   (FiiO's app skips 7 bytes,
+//                                                     then reads HH, ST, LL)
+// A packet is 8 + LEN bytes (+1 checksum byte if flags bit 0 is set).
+
+export const SPP_UUID = '00001101-0000-1000-8000-00805f9b34fb';
+
+export function encodeGaiaSpp(cmd, data = []) {
+  const body = encodeGaia(cmd, data); // validates against the allowlist
+  const d = Array.from(body.slice(5));
+  if (d.length + 1 > 254) throw new Error('Payload too long');
+  return Uint8Array.from([0xFF, 0x03, 0x00, d.length + 1, 0x00, 0x1D, 0xCC, (cmd >> 8) & 0xFF, cmd & 0xFF, ...d]);
+}
+
+export function decodeGaiaSpp(input) {
+  const b = input instanceof Uint8Array ? input : Uint8Array.from(input);
+  if (b.length < 10 || b[0] !== 0xFF) return { valid: false, raw: b, error: 'not a GAIA serial packet' };
+  const end = b.length - ((b[2] & 1) ? 1 : 0);
+  if (b[6] === 0xCC) {
+    return { valid: true, kind: 'request', cmd: (b[7] << 8) | b[8], data: b.slice(9, end), raw: b };
+  }
+  return { valid: true, kind: 'reply', cmd: (b[7] << 8) | b[9], status: b[8], data: b.slice(10, end), raw: b, vendor: (b[4] << 8) | b[5], cmdHi: b[6] };
+}
+
+// Splits a serial byte stream into GAIA packets. Bytes before a 0xFF start
+// byte, or a packet that never completes, come back as `junk` for the log.
+export class GaiaStreamParser {
+  constructor() { this.buf = []; }
+  push(chunk) {
+    for (const x of chunk) this.buf.push(x);
+    const packets = [];
+    const junk = [];
+    for (;;) {
+      if (!this.buf.length) break;
+      if (this.buf[0] !== 0xFF) { junk.push(this.buf.shift()); continue; }
+      if (this.buf.length < 4) break;
+      const total = 8 + this.buf[3] + ((this.buf[2] & 1) ? 1 : 0);
+      if (this.buf.length < total) break;
+      packets.push(Uint8Array.from(this.buf.splice(0, total)));
+    }
+    return { packets, junk: junk.length ? Uint8Array.from(junk) : null };
+  }
+  // Whatever is left over (used after a pause, so a mis-framed reply still shows up).
+  flush() { const b = this.buf; this.buf = []; return b.length ? Uint8Array.from(b) : null; }
+}
