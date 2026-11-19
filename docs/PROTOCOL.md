@@ -60,6 +60,7 @@ The FiiO command numbers and payloads are the same on both transports.
 * Web Bluetooth works from a local `file://` page. The BTR15 advertises as **`FIIO BTR15`**, accepts a GATT connection and has the GAIA service and characteristics. The command characteristic supports write with response.
 * The first command written was refused with **"Authentication failed"** while the PC was not paired with the BTR15: the GAIA characteristics require a paired (encrypted) link. After that the link dropped and Chrome reported "Connection already in progress" for further writes. The page now stops at the first refusal and explains how to pair.
 * After pairing through Windows Settings (classic pairing), every write failed at once with "Connection already in progress". The LE link apparently still lacks the security the GAIA characteristics need. This is why the page now uses the classic serial route first, the one FiiO Control uses while the BTR15 is connected.
+* Windows' COM-port dialog reports that the BTR15 "does not have a serial port service running", so it does not offer the standard SPP UUID. The APK's Qualcomm GAIA library falls back to Qualcomm's own GAIA serial UUID `00001107-d102-11e1-9b23-00025b00a5a5` when SPP is absent. The page now asks Web Serial for that service (and SPP) on paired Bluetooth devices.
 
 ## USB HID (reference; not working on the BTR15)
 

@@ -10,7 +10,7 @@ import { Btr15, toDeviceBands, fmtBand, compareValues } from './btr15.js';
 import { SimulatedBtr15Spp } from './sim.js';
 import { BleLink, SppLink } from './ble.js';
 import { Btr15Bt } from './btr15bt.js';
-import { BTR15_BT, GAIA_SERVICE, BT, SPP_UUID } from './gaia.js';
+import { BTR15_BT, GAIA_SERVICE, BT, SPP_UUID, GAIA_SPP_UUID } from './gaia.js';
 import { TrafficLog } from './log.js';
 import { ResponseGraph } from './graph.js';
 import { LISTEN_TESTS, NoiseEngine } from './listen.js';
@@ -172,20 +172,29 @@ if (!('hid' in navigator)) {
 }
 
 // ── Bluetooth serial: what FiiO Control uses while the BTR15 plays audio ────
-const SERIAL_HELP = `<p>Pick the BTR15's Bluetooth serial port. It may be listed as <b>FIIO BTR15</b> or as <b>Standard Serial over Bluetooth link (COM…)</b>. Windows usually makes two of those; the right one is the <b>outgoing</b> port. If the page gets no answer, connect again and try the other one.</p>
-  <p>If no such port is listed:</p>
+const SERIAL_HELP = `<p>The list should show the BTR15 (for example <b>FIIO BTR15</b>) when it is paired with Windows and switched on. Pick it.</p>
+  <p>If it is not listed:</p>
   <ol>
-    <li>Make sure the BTR15 is paired in Windows (<b>Settings → Bluetooth &amp; devices</b>).</li>
-    <li>Open <b>Settings → Bluetooth &amp; devices → Devices → More Bluetooth settings</b>, tab <b>COM Ports</b>. Press <b>Add…</b>, choose <b>Outgoing</b>, pick the BTR15 and its <b>Serial Port</b> service, then OK. The tab also shows which COM number is the outgoing one.</li>
-    <li>Press <b>Connect BTR15</b> again.</li>
+    <li>Check that the BTR15 is paired and connected in Windows (<b>Settings → Bluetooth &amp; devices</b>), and that FiiO Control on the phone is closed.</li>
+    <li>Press <b>Connect BTR15</b> again; the page then also offers to show every serial port.</li>
+    <li>To help me: open <b>Control Panel → Hardware and Sound → Devices and Printers</b>, right-click the BTR15, choose <b>Properties</b>, open the <b>Services</b> tab (or <b>Hardware</b> tab) and tell me what is listed.</li>
   </ol>`;
 
+let serialAttempts = 0;
 $('btnConnect').onclick = async () => {
   let port;
+  const ids = [GAIA_SPP_UUID, SPP_UUID];
+  // First try: only Bluetooth devices offering GAIA or SPP. Later tries also
+  // list every serial port, in case the BTR15 shows up as a COM port.
+  const opts = serialAttempts++ === 0
+    ? { filters: ids.map((id) => ({ bluetoothServiceClassId: id })), allowedBluetoothServiceClassIds: ids }
+    : { allowedBluetoothServiceClassIds: ids };
+  log.info(`Opening the serial port chooser (${opts.filters ? 'Bluetooth GAIA/SPP services only' : 'all serial ports, plus Bluetooth GAIA/SPP services'}).`);
   try {
-    port = await navigator.serial.requestPort({ allowedBluetoothServiceClassIds: [SPP_UUID] });
+    port = await navigator.serial.requestPort(opts);
   } catch (e) {
     if (e instanceof TypeError) {
+      log.warn(`This browser does not accept Bluetooth service filters (${e.message}); listing plain serial ports.`);
       try { port = await navigator.serial.requestPort(); } catch (e2) { log.info(`No serial port chosen (${e2.message}).`); await alertDlg('No port chosen', SERIAL_HELP); return; }
     } else if (e.name === 'NotFoundError') {
       log.info(`No serial port chosen (${e.message}).`);

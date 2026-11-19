@@ -89,7 +89,7 @@ export class BleLink {
   }
 
   _handlePacket(data) {
-    const f = this.decode(data);
+    const f = (this.decodeIn ?? this.decode)(data);
     if (!f.valid || f.kind !== 'reply') {
       this.stats.unparsed++;
       this.log?.rx(`packet not understood (${f.error ?? f.kind})`, data);
@@ -251,6 +251,7 @@ export class SppLink extends BleLink {
     this.transport = 'bluetooth-serial';
     this.encode = encodeGaiaSpp;
     this.decode = decodeGaiaSpp;
+    this.decodeIn = (b) => decodeGaiaSpp(b, { incoming: true });
     this.parser = new GaiaStreamParser();
   }
 

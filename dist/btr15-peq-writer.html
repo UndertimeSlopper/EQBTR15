@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BTR15 PEQ Writer</title>
-<!-- single-file build of a47a740 -->
+<!-- single-file build of 6f4752d -->
 <meta name="description" content="Write, read back and verify parametric EQ presets on a FiiO BTR15 over USB (WebHID), with auto-EQ fitting of AutoEQ files.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23256f6a'/%3E%3Cpath d='M4 20 C9 20 9 9 14 9 S19 23 24 23 S27 16 28 16' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
@@ -2135,17 +2135,18 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     return v.toString(16).toUpperCase().padStart(4, "0");
   }
   var SPP_UUID = "00001101-0000-1000-8000-00805f9b34fb";
+  var GAIA_SPP_UUID = "00001107-d102-11e1-9b23-00025b00a5a5";
   function encodeGaiaSpp(cmd, data = []) {
     const body = encodeGaia(cmd, data);
     const d = Array.from(body.slice(5));
     if (d.length + 1 > 254) throw new Error("Payload too long");
     return Uint8Array.from([255, 3, 0, d.length + 1, 0, 29, 204, cmd >> 8 & 255, cmd & 255, ...d]);
   }
-  function decodeGaiaSpp(input) {
+  function decodeGaiaSpp(input, { incoming = false } = {}) {
     const b = input instanceof Uint8Array ? input : Uint8Array.from(input);
     if (b.length < 10 || b[0] !== 255) return { valid: false, raw: b, error: "not a GAIA serial packet" };
     const end = b.length - (b[2] & 1 ? 1 : 0);
-    if (b[6] === 204) {
+    if (b[6] === 204 && !incoming) {
       return { valid: true, kind: "request", cmd: b[7] << 8 | b[8], data: b.slice(9, end), raw: b };
     }
     return { valid: true, kind: "reply", cmd: b[7] << 8 | b[9], status: b[8], data: b.slice(10, end), raw: b, vendor: b[4] << 8 | b[5], cmdHi: b[6] };
@@ -2438,7 +2439,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       this._handlePacket(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
     }
     _handlePacket(data) {
-      const f = this.decode(data);
+      const f = (this.decodeIn ?? this.decode)(data);
       if (!f.valid || f.kind !== "reply") {
         this.stats.unparsed++;
         this.log?.rx(`packet not understood (${f.error ?? f.kind})`, data);
@@ -2610,6 +2611,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       this.transport = "bluetooth-serial";
       this.encode = encodeGaiaSpp;
       this.decode = decodeGaiaSpp;
+      this.decodeIn = (b) => decodeGaiaSpp(b, { incoming: true });
       this.parser = new GaiaStreamParser();
     }
     async open() {
@@ -3455,19 +3457,24 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       }, 600);
     });
   }
-  var SERIAL_HELP = `<p>Pick the BTR15's Bluetooth serial port. It may be listed as <b>FIIO BTR15</b> or as <b>Standard Serial over Bluetooth link (COM\u2026)</b>. Windows usually makes two of those; the right one is the <b>outgoing</b> port. If the page gets no answer, connect again and try the other one.</p>
-  <p>If no such port is listed:</p>
+  var SERIAL_HELP = `<p>The list should show the BTR15 (for example <b>FIIO BTR15</b>) when it is paired with Windows and switched on. Pick it.</p>
+  <p>If it is not listed:</p>
   <ol>
-    <li>Make sure the BTR15 is paired in Windows (<b>Settings \u2192 Bluetooth &amp; devices</b>).</li>
-    <li>Open <b>Settings \u2192 Bluetooth &amp; devices \u2192 Devices \u2192 More Bluetooth settings</b>, tab <b>COM Ports</b>. Press <b>Add\u2026</b>, choose <b>Outgoing</b>, pick the BTR15 and its <b>Serial Port</b> service, then OK. The tab also shows which COM number is the outgoing one.</li>
-    <li>Press <b>Connect BTR15</b> again.</li>
+    <li>Check that the BTR15 is paired and connected in Windows (<b>Settings \u2192 Bluetooth &amp; devices</b>), and that FiiO Control on the phone is closed.</li>
+    <li>Press <b>Connect BTR15</b> again; the page then also offers to show every serial port.</li>
+    <li>To help me: open <b>Control Panel \u2192 Hardware and Sound \u2192 Devices and Printers</b>, right-click the BTR15, choose <b>Properties</b>, open the <b>Services</b> tab (or <b>Hardware</b> tab) and tell me what is listed.</li>
   </ol>`;
+  var serialAttempts = 0;
   $("btnConnect").onclick = async () => {
     let port;
+    const ids = [GAIA_SPP_UUID, SPP_UUID];
+    const opts = serialAttempts++ === 0 ? { filters: ids.map((id) => ({ bluetoothServiceClassId: id })), allowedBluetoothServiceClassIds: ids } : { allowedBluetoothServiceClassIds: ids };
+    log.info(`Opening the serial port chooser (${opts.filters ? "Bluetooth GAIA/SPP services only" : "all serial ports, plus Bluetooth GAIA/SPP services"}).`);
     try {
-      port = await navigator.serial.requestPort({ allowedBluetoothServiceClassIds: [SPP_UUID] });
+      port = await navigator.serial.requestPort(opts);
     } catch (e) {
       if (e instanceof TypeError) {
+        log.warn(`This browser does not accept Bluetooth service filters (${e.message}); listing plain serial ports.`);
         try {
           port = await navigator.serial.requestPort();
         } catch (e2) {

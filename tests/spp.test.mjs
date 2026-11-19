@@ -66,3 +66,9 @@ test('retries lost serial replies', async () => {
   assert.ok(link.stats.timeouts > 0);
   await link.close();
 });
+
+test('incoming packets are replies even if their command byte looks like a request', () => {
+  const pkt = Uint8Array.from([0xFF, 0x03, 0x00, 0x03, 0x00, 0x1D, 0xCC, 0x03, 0x00, 0x04, 0x09]);
+  const r = decodeGaiaSpp(pkt, { incoming: true });
+  assert.equal(r.kind, 'reply'); assert.equal(r.cmd, 0x0304); assert.deepEqual(Array.from(r.data), [9]);
+});

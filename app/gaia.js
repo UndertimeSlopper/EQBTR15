@@ -171,6 +171,10 @@ function hex4(v) { return v.toString(16).toUpperCase().padStart(4, '0'); }
 // A packet is 8 + LEN bytes (+1 checksum byte if flags bit 0 is set).
 
 export const SPP_UUID = '00001101-0000-1000-8000-00805f9b34fb';
+// Qualcomm's own GAIA serial service. Qualcomm's GAIA library uses SPP if a
+// device offers it and this otherwise; Windows makes no COM port for it, but
+// Web Serial can open it directly on a paired device.
+export const GAIA_SPP_UUID = '00001107-d102-11e1-9b23-00025b00a5a5';
 
 export function encodeGaiaSpp(cmd, data = []) {
   const body = encodeGaia(cmd, data); // validates against the allowlist
@@ -179,11 +183,13 @@ export function encodeGaiaSpp(cmd, data = []) {
   return Uint8Array.from([0xFF, 0x03, 0x00, d.length + 1, 0x00, 0x1D, 0xCC, (cmd >> 8) & 0xFF, cmd & 0xFF, ...d]);
 }
 
-export function decodeGaiaSpp(input) {
+// `incoming`: everything the device sends is treated as a reply, whatever
+// its command byte says.
+export function decodeGaiaSpp(input, { incoming = false } = {}) {
   const b = input instanceof Uint8Array ? input : Uint8Array.from(input);
   if (b.length < 10 || b[0] !== 0xFF) return { valid: false, raw: b, error: 'not a GAIA serial packet' };
   const end = b.length - ((b[2] & 1) ? 1 : 0);
-  if (b[6] === 0xCC) {
+  if (b[6] === 0xCC && !incoming) {
     return { valid: true, kind: 'request', cmd: (b[7] << 8) | b[8], data: b.slice(9, end), raw: b };
   }
   return { valid: true, kind: 'reply', cmd: (b[7] << 8) | b[9], status: b[8], data: b.slice(10, end), raw: b, vendor: (b[4] << 8) | b[5], cmdHi: b[6] };
