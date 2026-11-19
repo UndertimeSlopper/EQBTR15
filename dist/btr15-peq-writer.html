@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BTR15 PEQ Writer</title>
-<!-- single-file build of 392f09d -->
+<!-- single-file build of 63cd6d9 -->
 <meta name="description" content="Write, read back and verify parametric EQ presets on a FiiO BTR15 over USB (WebHID), with auto-EQ fitting of AutoEQ files.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23256f6a'/%3E%3Cpath d='M4 20 C9 20 9 9 14 9 S19 23 24 23 S27 16 28 16' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
@@ -1698,6 +1698,55 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
   }
   var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   var hex4 = (v) => (v ?? 0).toString(16).toUpperCase().padStart(4, "0");
+  var GAIA_HID_VARIANTS = [
+    { name: "GAIA as over BLE (00 0A 04 00 02)", bytes: [0, 10, 4, 0, 2] },
+    { name: "GAIA v3 serial framing (FF 03 \u2026 00 1D CC 00 02)", bytes: [255, 3, 0, 1, 0, 29, 204, 0, 2] },
+    { name: "GAIA v1 serial framing (FF 01 \u2026 00 0A 04 00 02)", bytes: [255, 1, 0, 1, 0, 10, 4, 0, 2] }
+  ];
+  async function probeGaiaOverHid(link, log2) {
+    const dev = link.device;
+    const reportId = link.reportId;
+    const seen = [];
+    const onRep = (ev) => {
+      const d = new Uint8Array(ev.data.buffer, ev.data.byteOffset, ev.data.byteLength);
+      if (d.some((b) => b !== 0)) seen.push(d.slice());
+    };
+    dev.addEventListener("inputreport", onRep);
+    const results = [];
+    try {
+      for (const prefix of [[], [7]]) {
+        for (const v of GAIA_HID_VARIANTS) {
+          const body = Uint8Array.from([...prefix, ...v.bytes]);
+          const len = outputReportLength(dev, reportId);
+          let data = body;
+          if (len && body.length < len) {
+            data = new Uint8Array(len);
+            data.set(body);
+          }
+          const label = `${v.name}${prefix.length ? ", after a 07 byte" : ""}`;
+          log2?.tx(`GAIA probe over USB: ${label} [report ${reportId}]`, body);
+          const before = seen.length;
+          try {
+            await dev.sendReport(reportId, data);
+          } catch (e) {
+            log2?.warn(`The browser refused to send it: ${e.message}`);
+            continue;
+          }
+          await sleep(900);
+          const got = seen.slice(before);
+          if (got.length) {
+            log2?.info(`GAIA PROBE RESULT: ${got.length} non-empty report(s) after "${label}".`);
+            for (const g of got.slice(0, 4)) log2?.rx("reply to GAIA probe", g);
+            results.push({ variant: label, replies: got.map((g) => hexBytes(g)) });
+          }
+        }
+      }
+    } finally {
+      dev.removeEventListener("inputreport", onRep);
+    }
+    if (!results.length) log2?.info("GAIA probe over USB: no non-empty report came back for any framing.");
+    return results;
+  }
 
   // app/btr15.js
   var Btr15 = class {
@@ -1801,7 +1850,13 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       }
       if (!p) {
         info.noAnswer = true;
-        this.log?.error("The device did not answer GET PEQ_COUNT in any of the encodings tried. Nothing further was sent.");
+        this.log?.error("The device did not answer GET PEQ_COUNT in any of the FiiO USB encodings tried.");
+        try {
+          info.gaiaProbe = await probeGaiaOverHid(this.link, this.log);
+        } catch (e) {
+          this.log?.warn(`GAIA probe failed: ${e.message}`);
+        }
+        this.log?.info("Nothing further was sent.");
         return info;
       }
       info.framing = p.framing;

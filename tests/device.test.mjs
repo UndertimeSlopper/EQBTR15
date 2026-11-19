@@ -146,3 +146,31 @@ test('without report IDs and no 07 expected, the plain encoding is found', async
   assert.match(info.encoding, /frame at byte 0, current/);
   await link.close();
 });
+
+test('GAIA probe over USB sends only version requests and reports replies', async () => {
+  const dev = new SimulatedBtr15({ noReportIds: true, wantsPrefix07: true });
+  const sent = [];
+  dev.sendReport = async (id, data) => {
+    sent.push(Uint8Array.from(data));
+    const b = Uint8Array.from(data);
+    // Pretend the device answers the GAIA BLE-style framing.
+    if (b[0] === 0x00 && b[1] === 0x0A && b[2] === 0x04) {
+      const ev = new Event('inputreport');
+      const r = new Uint8Array(32); r.set([0x00, 0x0A, 0x84, 0x00, 0x00, 0x02, 0x04, 0x04]);
+      ev.data = new DataView(r.buffer); ev.reportId = 0;
+      setTimeout(() => dev.dispatchEvent(ev), 5);
+    }
+    return undefined; // ignores FiiO's USB frames, like the real BTR15
+  };
+  const log = new TrafficLog();
+  const link = new FiioLink(dev, { reportId: 0, log, timeoutMs: 40, profile: fast });
+  await link.open();
+  const info = await new Btr15(link, { profile: fast, log }).identify();
+  assert.equal(info.noAnswer, true);
+  assert.equal(info.gaiaProbe.length, 1);
+  assert.match(info.gaiaProbe[0].variant, /BLE/);
+  // Every GAIA probe frame carries FiiO command 0x0002 (version) and nothing else.
+  const gaia = sent.filter((b) => b[0] === 0x00 || b[0] === 0xFF || (b[0] === 0x07 && (b[1] === 0x00 || b[1] === 0xFF)));
+  assert.equal(gaia.length, 6);
+  await link.close();
+});

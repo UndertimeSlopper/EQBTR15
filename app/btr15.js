@@ -10,7 +10,7 @@
 // Any mismatch stops the sequence and is reported with a diff.
 
 import { CMD, BTR15, encodeBand, decodeBand, encodeGain, decodeGain, decodeUint, encodeUint, slotName } from './protocol.js';
-import { sleep } from './device.js';
+import { sleep, probeGaiaOverHid } from './device.js';
 
 export class Btr15 {
   constructor(link, { profile = BTR15, log } = {}) {
@@ -105,7 +105,10 @@ export class Btr15 {
     try { p = await this.probe(); } catch (e) { info.errors = [`probe: ${e.message}`]; }
     if (!p) {
       info.noAnswer = true;
-      this.log?.error('The device did not answer GET PEQ_COUNT in any of the encodings tried. Nothing further was sent.');
+      this.log?.error('The device did not answer GET PEQ_COUNT in any of the FiiO USB encodings tried.');
+      // Last diagnostic: the same read-only version request in GAIA framing.
+      try { info.gaiaProbe = await probeGaiaOverHid(this.link, this.log); } catch (e) { this.log?.warn(`GAIA probe failed: ${e.message}`); }
+      this.log?.info('Nothing further was sent.');
       return info;
     }
     info.framing = p.framing;

@@ -292,3 +292,58 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const hex4 = (v) => (v ?? 0).toString(16).toUpperCase().padStart(4, '0');
 
 export { CMD, hexBytes };
+
+// ── GAIA over the USB HID interface (diagnostic) ────────────────────────────
+// The BTR15's "FIIO BTR15 EQ" interface did not answer FiiO's USB frames.
+// FiiO's Bluetooth commands travel as Qualcomm GAIA packets, and Qualcomm parts
+// can take GAIA over USB too, so this sends ONE read-only request (FiiO
+// command 0x0002, firmware version) wrapped in each GAIA framing seen in
+// FiiO Control, and logs any non-empty report that comes back. No other bytes
+// are sent, and none of these are write commands.
+export const GAIA_HID_VARIANTS = [
+  { name: 'GAIA as over BLE (00 0A 04 00 02)', bytes: [0x00, 0x0A, 0x04, 0x00, 0x02] },
+  { name: 'GAIA v3 serial framing (FF 03 … 00 1D CC 00 02)', bytes: [0xFF, 0x03, 0x00, 0x01, 0x00, 0x1D, 0xCC, 0x00, 0x02] },
+  { name: 'GAIA v1 serial framing (FF 01 … 00 0A 04 00 02)', bytes: [0xFF, 0x01, 0x00, 0x01, 0x00, 0x0A, 0x04, 0x00, 0x02] },
+];
+
+export async function probeGaiaOverHid(link, log) {
+  const dev = link.device;
+  const reportId = link.reportId;
+  const seen = [];
+  const onRep = (ev) => {
+    const d = new Uint8Array(ev.data.buffer, ev.data.byteOffset, ev.data.byteLength);
+    if (d.some((b) => b !== 0)) seen.push(d.slice());
+  };
+  dev.addEventListener('inputreport', onRep);
+  const results = [];
+  try {
+    for (const prefix of [[], [0x07]]) {
+      for (const v of GAIA_HID_VARIANTS) {
+        const body = Uint8Array.from([...prefix, ...v.bytes]);
+        const len = outputReportLength(dev, reportId);
+        let data = body;
+        if (len && body.length < len) { data = new Uint8Array(len); data.set(body); }
+        const label = `${v.name}${prefix.length ? ', after a 07 byte' : ''}`;
+        log?.tx(`GAIA probe over USB: ${label} [report ${reportId}]`, body);
+        const before = seen.length;
+        try {
+          await dev.sendReport(reportId, data);
+        } catch (e) {
+          log?.warn(`The browser refused to send it: ${e.message}`);
+          continue;
+        }
+        await sleep(900);
+        const got = seen.slice(before);
+        if (got.length) {
+          log?.info(`GAIA PROBE RESULT: ${got.length} non-empty report(s) after "${label}".`);
+          for (const g of got.slice(0, 4)) log?.rx('reply to GAIA probe', g);
+          results.push({ variant: label, replies: got.map((g) => hexBytes(g)) });
+        }
+      }
+    }
+  } finally {
+    dev.removeEventListener('inputreport', onRep);
+  }
+  if (!results.length) log?.info('GAIA probe over USB: no non-empty report came back for any framing.');
+  return results;
+}
