@@ -182,7 +182,7 @@ function fmtGain(g) { return (g > 0 ? '+' : '') + g.toFixed(1); }
 // ── BTR15 profile (from FiiO's web app tables) ─────────────────────────────
 export const BTR15 = {
   name: 'FiiO BTR15',
-  productNames: ['FIIO BTR15'],
+  productNames: ['FIIO BTR15', 'FIIO BTR15 EQ'], // the second is what a real BTR15 reported (PID 0x0047)
   reportId: 7,
   expectedBands: 10,
   presetSwitchDelayMs: 1000, // FiiO's app waits 1 s after a preset switch on the BTR15

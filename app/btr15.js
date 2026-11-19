@@ -57,24 +57,41 @@ export class Btr15 {
     return bands;
   }
 
-  // Find a frame format the device answers, using a harmless GET. FiiO's
-  // current app sends a sequence number and CRC; its older app and devicePEQ
-  // send zeros there. Both are tried, current first.
+  // Find how this device wants frames carried, using a harmless GET
+  // (PEQ_COUNT). FiiO models with a numbered report (7) get the frame as the
+  // report. On an interface without report IDs (the BTR15's "EQ" interface),
+  // FiiO firmware may still expect the 07 as the first data byte, which is
+  // what it would receive on the wire from a report-7 device. Both frame
+  // formats are tried: FiiO's current one (sequence number and CRC) and the
+  // older one (zeros there).
   async probe() {
-    for (const framing of ['current', 'legacy']) {
-      this.link.framing = framing;
-      this.log?.info(framing === 'current'
-        ? "Probing with FiiO's current frame format (sequence number and CRC): GET PEQ_COUNT"
-        : 'No answer. Probing with the older frame format (sequence 00 00, checksum 00): GET PEQ_COUNT');
+    const L = this.link;
+    const base = L.reportId;
+    const variants = L.usesReportIds
+      ? [
+        { reportId: base, prefix: [], framing: 'current', why: `report ${base}, FiiO's current frame format` },
+        { reportId: base, prefix: [], framing: 'legacy', why: `report ${base}, older frame format (sequence and checksum 00)` },
+      ]
+      : [
+        { reportId: 0, prefix: [0x07], framing: 'current', why: 'no report IDs: 07 as the first data byte, current frame format' },
+        { reportId: 0, prefix: [0x07], framing: 'legacy', why: 'no report IDs: 07 as the first data byte, older frame format' },
+        { reportId: 0, prefix: [], framing: 'current', why: 'no report IDs: frame at byte 0, current frame format' },
+        { reportId: 0, prefix: [], framing: 'legacy', why: 'no report IDs: frame at byte 0, older frame format' },
+        { reportId: 7, prefix: [], framing: 'current', why: "report 7, as FiiO's web app sends it (Chrome may refuse this)" },
+      ];
+    for (const [i, v] of variants.entries()) {
+      L.setEncoding(v);
+      this.log?.info(`Probe ${i + 1} of ${variants.length}: ${v.why}. GET PEQ_COUNT`);
       try {
-        const n = await this.readBandCount();
-        this.log?.info(`The device answers the ${framing} frame format; using it from now on.`);
-        return { framing, bandCount: n };
+        const f = await L.get(CMD.PEQ_COUNT, [], { retries: 1, timeoutMs: 600 });
+        this.log?.info(`PROBE RESULT: the device answers with ${v.why}. Using this from now on.`);
+        return { ...v, count: f.payload[0] };
       } catch (e) {
+        if (e.code === 'send') { this.log?.warn(`The browser refused to send this: ${e.message}`); continue; }
         if (e.code !== 'timeout') throw e;
       }
     }
-    this.link.framing = 'current';
+    L.setEncoding(variants[0]);
     return null;
   }
 
@@ -88,11 +105,18 @@ export class Btr15 {
     try { p = await this.probe(); } catch (e) { info.errors = [`probe: ${e.message}`]; }
     if (!p) {
       info.noAnswer = true;
-      this.log?.error('The device did not answer GET PEQ_COUNT in either frame format. Nothing further was sent.');
+      this.log?.error('The device did not answer GET PEQ_COUNT in any of the encodings tried. Nothing further was sent.');
       return info;
     }
     info.framing = p.framing;
-    info.bandCount = p.bandCount;
+    info.encoding = p.why;
+    if (!p.count || p.count > 32) {
+      info.bandCount = null;
+      info.errors = [`bandCount: the device reported an implausible band count (${p.count})`];
+    } else {
+      info.bandCount = p.count;
+      this.bandCount = p.count;
+    }
     await tryRead('firmware', () => this.readFirmware());
     await tryRead('eqSwitch', () => this.readEqSwitch());
     await tryRead('preset', () => this.readPreset());

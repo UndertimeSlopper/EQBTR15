@@ -18,14 +18,19 @@ export class SimulatedBtr15 extends EventTarget {
       echoSeq: true,
       emptyEveryMs: 0,            // send an all-zero report this often, like a device answering every USB poll
       legacyOnly: false,          // only answer frames with sequence 00 00 and checksum 00; zeros otherwise
+      noReportIds: false,         // one 32-byte report without an ID, like the BTR15's "EQ" interface
+      wantsPrefix07: false,       // frames carried after a 07 byte, in both directions
       ...options,
     };
+    this.reportId = this.options.noReportIds ? 0 : 7;
     this.productName = 'FIIO BTR15 (simulated)';
     this.vendorId = 0x2972;
     this.productId = 0x0F15;
     this.opened = false;
     this.oninputreport = null;
-    this.collections = [
+    this.collections = this.options.noReportIds ? [
+      { usagePage: 0x0001, usage: 0x0000, inputReports: [{ reportId: 0, items: [{ reportSize: 8, reportCount: 32 }] }], outputReports: [{ reportId: 0, items: [{ reportSize: 8, reportCount: 32 }] }], featureReports: [] },
+    ] : [
       { usagePage: 0x000C, usage: 0x0001, inputReports: [{ reportId: 1, items: [{ reportSize: 8, reportCount: 2 }] }], outputReports: [], featureReports: [] },
       { usagePage: 0xFF00, usage: 0x0001, inputReports: [{ reportId: 7, items: [{ reportSize: 8, reportCount: 63 }] }], outputReports: [{ reportId: 7, items: [{ reportSize: 8, reportCount: 63 }] }], featureReports: [] },
     ];
@@ -61,7 +66,7 @@ export class SimulatedBtr15 extends EventTarget {
       if (!this.opened) return;
       const ev = new Event('inputreport');
       ev.data = new DataView(report.buffer);
-      ev.reportId = 7;
+      ev.reportId = this.reportId;
       ev.device = this;
       this.dispatchEvent(ev);
       this.oninputreport?.(ev);
@@ -70,8 +75,13 @@ export class SimulatedBtr15 extends EventTarget {
 
   async sendReport(reportId, data) {
     if (!this.opened) throw new Error('Device not open');
-    if (reportId !== 7) return; // ignored, like a report the device does not listen to
-    const bytes = new Uint8Array(data.buffer ?? data, data.byteOffset ?? 0, data.byteLength ?? data.length);
+    if (this.options.noReportIds && reportId !== 0) throw new DOMException('Failed to write the report.', 'NotAllowedError'); // as Chrome does
+    if (reportId !== this.reportId) return; // ignored, like a report the device does not listen to
+    let bytes = new Uint8Array(data.buffer ?? data, data.byteOffset ?? 0, data.byteLength ?? data.length);
+    if (this.options.wantsPrefix07) {
+      if (bytes[0] !== 0x07) return; // firmware ignores it
+      bytes = bytes.subarray(1);
+    }
     const f = decodeFrame(bytes);
     this.received.push(f);
     if (!f.valid) return;
@@ -123,8 +133,8 @@ export class SimulatedBtr15 extends EventTarget {
     const seq = this.options.echoSeq ? req.seq : 0;
     const body = [0xBB, 0x0B, (seq >> 8) & 0xFF, seq & 0xFF, req.cmd, payload.length, ...payload];
     const frame = [...body, crc8(body), 0xEE];
-    const report = new Uint8Array(63);
-    report.set(frame);
+    const report = new Uint8Array(this.options.noReportIds ? 32 : 63);
+    report.set(this.options.wantsPrefix07 ? [0x07, ...frame] : frame);
     this._emit(report);
   }
 }

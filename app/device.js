@@ -68,6 +68,7 @@ export class FiioLink {
     this.closed = false;
     this.seqEcho = null; // learned: does the device echo our sequence number?
     this.framing = 'current'; // or 'legacy' (seq 00 00, checksum 00)
+    this.prefix = [];         // bytes put in front of the frame inside the report (e.g. [0x07])
     this.stats = { tx: 0, frames: 0, crcBad: 0, timeouts: 0, unsolicited: 0, empty: 0, emptyNearTx: 0, unparsed: 0 };
     this.lastTxAt = 0;
     this._quiet = { empty: 0, emptyNearTx: 0, unparsed: 0, since: 0, timer: null, seenUnparsed: new Set() };
@@ -78,7 +79,16 @@ export class FiioLink {
     if (!this.device.opened) await this.device.open();
     this.device.addEventListener('inputreport', this._onInput);
     this.padTo = outputReportLength(this.device, this.reportId);
+    this.usesReportIds = (this.device.collections ?? []).some((c) => [...(c.inputReports ?? []), ...(c.outputReports ?? [])].some((r) => (r.reportId ?? 0) !== 0));
     this.log?.info(`Opened "${this.device.productName}" VID 0x${hex4(this.device.vendorId)} PID 0x${hex4(this.device.productId)}; using output report ${this.reportId}${this.padTo ? ` (${this.padTo} bytes)` : ' (length unknown, not padded)'}`);
+  }
+
+  // Choose how frames are carried. Used by the connection probe.
+  setEncoding({ reportId = this.reportId, prefix = this.prefix, framing = this.framing } = {}) {
+    this.reportId = reportId;
+    this.prefix = prefix;
+    this.framing = framing;
+    this.padTo = outputReportLength(this.device, reportId);
   }
 
   async close() {
@@ -119,8 +129,15 @@ export class FiioLink {
       this._noteQuiet('empty', near, () => `Input report ${ev.reportId ?? '?'} arrives as ${data.length} zero bytes. These carry no data; from now on they are counted and summarised every few seconds instead of logged.`);
       return;
     }
-    const frame = decodeFrame(data);
-    const shown = frame.payload ? data.slice(0, 8 + frame.payload.length) : data;
+    // Frames normally start at byte 0. A firmware that carries the report ID
+    // inside the data puts one byte (07) in front, so look a little further.
+    let off = 0;
+    while (off < 3 && !isHeader(data, off)) off++;
+    if (off === 3) off = 0;
+    const frame = decodeFrame(off ? data.subarray(off) : data);
+    if (off) frame.offset = off;
+    const shown = frame.payload ? data.slice(0, off + 8 + frame.payload.length) : data;
+    if (frame.valid && off) frame.note = ` [frame at byte ${off}, after ${hexBytes(data.slice(0, off))}]`;
     if (!frame.valid) {
       this.stats.unparsed++;
       const key = `${ev.reportId}:${hexBytes(data.slice(0, 16))}`;
@@ -145,7 +162,7 @@ export class FiioLink {
         this.seqEcho = frame.seq === waiter.seq;
         this.log?.info(`Device ${this.seqEcho ? 'echoes' : 'does not echo'} the frame sequence number${this.seqEcho ? '; replies are now matched by it' : ''}.`);
       }
-      this.log?.rx(`${this._describe(frame)}${note}${idNote}`, shown);
+      this.log?.rx(`${this._describe(frame)}${note}${frame.note ?? ''}${idNote}`, shown);
       if (!frame.crcOk && waiter.strictCrc) return; // let it time out and retry
       this.waiters.splice(this.waiters.indexOf(waiter), 1);
       clearTimeout(waiter.timer);
@@ -153,7 +170,7 @@ export class FiioLink {
       return;
     }
     this.stats.unsolicited++;
-    this.log?.rx(`(unsolicited) ${this._describe(frame)}${note}${idNote}`, shown);
+    this.log?.rx(`(unsolicited) ${this._describe(frame)}${note}${frame.note ?? ''}${idNote}`, shown);
     for (const fn of this.unsolicited) { try { fn(frame); } catch { /* listener error */ } }
   }
 
@@ -187,9 +204,10 @@ export class FiioLink {
 
   async _send(frameBytes, text) {
     if (this.closed) throw new LinkError('Not connected', 'closed');
-    let data = frameBytes;
-    if (this.padTo && data.length < this.padTo) { data = new Uint8Array(this.padTo); data.set(frameBytes); }
-    this.log?.tx(text, frameBytes);
+    const body = this.prefix.length ? Uint8Array.from([...this.prefix, ...frameBytes]) : frameBytes;
+    let data = body;
+    if (this.padTo && data.length < this.padTo) { data = new Uint8Array(this.padTo); data.set(body); }
+    this.log?.tx(`${text}${this.reportId !== 7 || this.prefix.length ? ` [report ${this.reportId}${this.prefix.length ? ', data starts ' + hexBytes(this.prefix) : ''}]` : ''}`, body);
     this.stats.tx++;
     this.lastTxAt = Date.now();
     try {
@@ -258,6 +276,10 @@ export class FiioLink {
 
   // Run a block of commands without other queued work interleaving.
   idle() { return this.queue; }
+}
+
+function isHeader(d, i) {
+  return (d[i] === 0xBB && d[i + 1] === 0x0B) || (d[i] === 0xAA && d[i + 1] === 0x0A);
 }
 
 function payloadEquals(a, b) {

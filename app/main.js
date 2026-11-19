@@ -53,7 +53,7 @@ function logHeader() {
     `BTR15 PEQ Writer ${APP_VERSION}  ${location.href}`,
     `Time ${new Date().toISOString()}  ${navigator.userAgent}`,
     c ? `Device "${c.device.productName}" VID 0x${hex4(c.device.vendorId)} PID 0x${hex4(c.device.productId)}${c.sim ? ' (SIMULATED)' : ''}` : 'Device: none',
-    c ? `Link stats ${JSON.stringify(c.link.stats)} framing=${c.link.framing} seqEcho=${c.link.seqEcho} reportId=${c.link.reportId} padTo=${c.link.padTo}` : '',
+    c ? `Link stats ${JSON.stringify(c.link.stats)} framing=${c.link.framing} prefix=[${c.link.prefix.join(',')}] usesReportIds=${c.link.usesReportIds} seqEcho=${c.link.seqEcho} reportId=${c.link.reportId} padTo=${c.link.padTo}` : '',
     `Model ${state.model}  allowWrites=${$('allowWrites').checked}`,
     '----',
   ].filter(Boolean).join('\n');
@@ -201,7 +201,7 @@ async function openDevice(devices, { sim = false, auto = false } = {}) {
     const ids = [...new Set((dev.collections ?? []).flatMap((c) => (c.outputReports ?? []).map((r) => r.reportId ?? 0)))];
     if (ids.length === 1) {
       reportId = ids[0];
-      log.warn(`The device lists no output report ${BTR15.reportId}; using its only output report, ${reportId}. Tell the developer.`);
+      log.info(`This interface has no output report ${BTR15.reportId}; its only output report is ${reportId}${reportId === 0 ? ' (no report IDs)' : ''}. The connection probe tries the ways FiiO firmware may expect frames on it.`);
     } else {
       log.warn(`The device lists no output report ${BTR15.reportId} (it has: ${ids.join(', ') || 'none'}). Trying ${reportId} anyway.`);
     }
@@ -235,12 +235,12 @@ async function identify(auto = false) {
     state.info = info;
     if (info.noAnswer) {
       setStatus('No answer from device', 'bad');
-      await alertDlg('The BTR15 did not answer', `<p>The page asked for the band count in both of FiiO's frame formats and got no reply. Nothing was written.</p>
+      await alertDlg('The BTR15 did not answer', `<p>The page asked for the band count in every encoding it knows and got no reply. Nothing was written.</p>
         <p>Please press <b>Copy log</b> and paste it into the chat. Also check that FiiO Control and fiiocontrol.fiio.com are closed, then try unplugging and reconnecting.</p>`);
       return;
     }
     if (info.errors?.length) log.warn(`Some reads failed: ${info.errors.join('; ')}`);
-    log.info(`Frame format: ${info.framing}. Read: firmware ${info.firmware?.join('.') ?? '?'}, EQ switch ${info.eqSwitch === null ? '?' : info.eqSwitch ? 'on' : 'off'}, preset ${info.preset ?? '?'} (${info.preset != null ? slotName(info.preset) : '?'}), ${info.bandCount ?? '?'} bands, global gain ${info.globalGain ?? '?'} dB`);
+    log.info(`Encoding: ${info.encoding}. Read: firmware ${info.firmware?.join('.') ?? '?'}, EQ switch ${info.eqSwitch === null ? '?' : info.eqSwitch ? 'on' : 'off'}, preset ${info.preset ?? '?'} (${info.preset != null ? slotName(info.preset) : '?'}), ${info.bandCount ?? '?'} bands, global gain ${info.globalGain ?? '?'} dB`);
     if (info.bands && info.preset != null) {
       state.slots[info.preset] = { globalGain: info.globalGain, bands: info.bands, readAt: Date.now() };
       logSlot(info.preset, state.slots[info.preset]);
@@ -263,7 +263,7 @@ function renderDevice() {
   $('fSwitch').textContent = info?.eqSwitch == null ? '–' : info.eqSwitch ? 'On' : 'Off';
   $('fPreset').textContent = info?.preset == null ? '–' : `${slotName(info.preset)} (${info.preset})`;
   $('fBands').textContent = info?.bandCount ?? '–';
-  $('fFraming').textContent = info?.noAnswer ? 'no answer' : info?.framing === 'legacy' ? 'older (zeros)' : info?.framing ? 'current (seq + CRC)' : '–';
+  $('fFraming').textContent = info?.noAnswer ? 'no answer' : info?.encoding ?? '–';
   $('fGain').textContent = info?.globalGain == null ? '–' : `${fmtG(info.globalGain)} dB`;
 
   const warn = [];

@@ -21,6 +21,14 @@ web app already has the BTR15 tables.
 * HID **output report 7** (FiiO uses 7 for every model not listed otherwise; only the KA17 (1) and JA11 (2) differ). Reports are zero-padded to the length in the HID descriptor.
 * Replies arrive as input reports. FiiO's app does not filter them by report ID.
 
+### Observed on a real BTR15 (Windows, Edge 157, 2026-11-19)
+
+* HID product name **`FIIO BTR15 EQ`**, VID `0x2972`, **PID `0x0047`**.
+* One HID interface: usage page `0x01` (Generic Desktop), usage `0x00`, **32-byte input and output reports, no report IDs** (report 0), no feature reports. There is no report 7, so FiiO's web-app rule ("report 7 unless listed") cannot apply as written.
+* The interface sends an **all-zero 32-byte input report every 4 ms** (250/s) whether or not anything was sent. These are ignored.
+* A GET frame placed at byte 0 of report 0 got **no reply**, in both the current and older frame formats.
+* Next hypothesis being tested: the firmware expects the report ID 07 as the first data byte (what it would receive from a report-7 interface), i.e. `07 BB 0B …`.
+
 ## Frame
 
 ```

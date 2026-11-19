@@ -113,6 +113,36 @@ test('reports no answer and stops when the device never replies', async () => {
   await link.open();
   const info = await new Btr15(link, { profile: fast, log }).identify();
   assert.equal(info.noAnswer, true);
-  assert.equal(link.stats.tx, 6, 'three tries in each of two frame formats, then nothing more');
+  assert.equal(link.stats.tx, 4, 'two tries in each of two frame formats, then nothing more');
+  await link.close();
+});
+
+test('BTR15 "EQ" interface without report IDs: finds the 07-prefixed encoding', async () => {
+  const dev = new SimulatedBtr15({ noReportIds: true, wantsPrefix07: true, emptyEveryMs: 4 });
+  const log = new TrafficLog();
+  const reportId = 0;
+  const link = new FiioLink(dev, { reportId, log, timeoutMs: 100, profile: fast });
+  await link.open();
+  assert.equal(link.usesReportIds, false);
+  const btr = new Btr15(link, { profile: fast, log });
+  const info = await btr.identify();
+  assert.equal(info.noAnswer, undefined, log.toText());
+  assert.match(info.encoding, /07 as the first data byte, current/);
+  assert.equal(info.bandCount, 10);
+  assert.equal(info.bands.length, 10);
+  // Writes use the same encoding.
+  const r = await btr.writeSlot(8, { globalGain: -1, bands: toDeviceBands([{ type: 'PK', freq: 500, gain: -2, q: 1 }], 10) });
+  assert.equal(r.ok, true);
+  assert.equal(dev.stored[8].bands[0].freq, 500);
+  await link.close();
+});
+
+test('without report IDs and no 07 expected, the plain encoding is found', async () => {
+  const dev = new SimulatedBtr15({ noReportIds: true });
+  const log = new TrafficLog();
+  const link = new FiioLink(dev, { reportId: 0, log, timeoutMs: 60, profile: fast });
+  await link.open();
+  const info = await new Btr15(link, { profile: fast, log }).identify();
+  assert.match(info.encoding, /frame at byte 0, current/);
   await link.close();
 });

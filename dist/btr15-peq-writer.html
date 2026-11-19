@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BTR15 PEQ Writer</title>
-<!-- single-file build of 8be7961 -->
+<!-- single-file build of f868f01 -->
 <meta name="description" content="Write, read back and verify parametric EQ presets on a FiiO BTR15 over USB (WebHID), with auto-EQ fitting of AutoEQ files.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23256f6a'/%3E%3Cpath d='M4 20 C9 20 9 9 14 9 S19 23 24 23 S27 16 28 16' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
@@ -1383,7 +1383,8 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
   }
   var BTR15 = {
     name: "FiiO BTR15",
-    productNames: ["FIIO BTR15"],
+    productNames: ["FIIO BTR15", "FIIO BTR15 EQ"],
+    // the second is what a real BTR15 reported (PID 0x0047)
     reportId: 7,
     expectedBands: 10,
     presetSwitchDelayMs: 1e3,
@@ -1462,6 +1463,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       this.closed = false;
       this.seqEcho = null;
       this.framing = "current";
+      this.prefix = [];
       this.stats = { tx: 0, frames: 0, crcBad: 0, timeouts: 0, unsolicited: 0, empty: 0, emptyNearTx: 0, unparsed: 0 };
       this.lastTxAt = 0;
       this._quiet = { empty: 0, emptyNearTx: 0, unparsed: 0, since: 0, timer: null, seenUnparsed: /* @__PURE__ */ new Set() };
@@ -1471,7 +1473,15 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       if (!this.device.opened) await this.device.open();
       this.device.addEventListener("inputreport", this._onInput);
       this.padTo = outputReportLength(this.device, this.reportId);
+      this.usesReportIds = (this.device.collections ?? []).some((c) => [...c.inputReports ?? [], ...c.outputReports ?? []].some((r) => (r.reportId ?? 0) !== 0));
       this.log?.info(`Opened "${this.device.productName}" VID 0x${hex4(this.device.vendorId)} PID 0x${hex4(this.device.productId)}; using output report ${this.reportId}${this.padTo ? ` (${this.padTo} bytes)` : " (length unknown, not padded)"}`);
+    }
+    // Choose how frames are carried. Used by the connection probe.
+    setEncoding({ reportId = this.reportId, prefix = this.prefix, framing = this.framing } = {}) {
+      this.reportId = reportId;
+      this.prefix = prefix;
+      this.framing = framing;
+      this.padTo = outputReportLength(this.device, reportId);
     }
     async close() {
       this.closed = true;
@@ -1513,8 +1523,13 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         this._noteQuiet("empty", near, () => `Input report ${ev.reportId ?? "?"} arrives as ${data.length} zero bytes. These carry no data; from now on they are counted and summarised every few seconds instead of logged.`);
         return;
       }
-      const frame = decodeFrame(data);
-      const shown = frame.payload ? data.slice(0, 8 + frame.payload.length) : data;
+      let off = 0;
+      while (off < 3 && !isHeader(data, off)) off++;
+      if (off === 3) off = 0;
+      const frame = decodeFrame(off ? data.subarray(off) : data);
+      if (off) frame.offset = off;
+      const shown = frame.payload ? data.slice(0, off + 8 + frame.payload.length) : data;
+      if (frame.valid && off) frame.note = ` [frame at byte ${off}, after ${hexBytes(data.slice(0, off))}]`;
       if (!frame.valid) {
         this.stats.unparsed++;
         const key = `${ev.reportId}:${hexBytes(data.slice(0, 16))}`;
@@ -1538,7 +1553,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
           this.seqEcho = frame.seq === waiter.seq;
           this.log?.info(`Device ${this.seqEcho ? "echoes" : "does not echo"} the frame sequence number${this.seqEcho ? "; replies are now matched by it" : ""}.`);
         }
-        this.log?.rx(`${this._describe(frame)}${note}${idNote}`, shown);
+        this.log?.rx(`${this._describe(frame)}${note}${frame.note ?? ""}${idNote}`, shown);
         if (!frame.crcOk && waiter.strictCrc) return;
         this.waiters.splice(this.waiters.indexOf(waiter), 1);
         clearTimeout(waiter.timer);
@@ -1546,7 +1561,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         return;
       }
       this.stats.unsolicited++;
-      this.log?.rx(`(unsolicited) ${this._describe(frame)}${note}${idNote}`, shown);
+      this.log?.rx(`(unsolicited) ${this._describe(frame)}${note}${frame.note ?? ""}${idNote}`, shown);
       for (const fn of this.unsolicited) {
         try {
           fn(frame);
@@ -1584,12 +1599,13 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     }
     async _send(frameBytes, text) {
       if (this.closed) throw new LinkError("Not connected", "closed");
-      let data = frameBytes;
+      const body = this.prefix.length ? Uint8Array.from([...this.prefix, ...frameBytes]) : frameBytes;
+      let data = body;
       if (this.padTo && data.length < this.padTo) {
         data = new Uint8Array(this.padTo);
-        data.set(frameBytes);
+        data.set(body);
       }
-      this.log?.tx(text, frameBytes);
+      this.log?.tx(`${text}${this.reportId !== 7 || this.prefix.length ? ` [report ${this.reportId}${this.prefix.length ? ", data starts " + hexBytes(this.prefix) : ""}]` : ""}`, body);
       this.stats.tx++;
       this.lastTxAt = Date.now();
       try {
@@ -1670,6 +1686,9 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       return this.queue;
     }
   };
+  function isHeader(d, i) {
+    return d[i] === 187 && d[i + 1] === 11 || d[i] === 170 && d[i + 1] === 10;
+  }
   function payloadEquals(a, b) {
     if (!a || a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -1723,22 +1742,42 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       for (let i = 0; i < n; i++) bands.push(await this.readBand(i));
       return bands;
     }
-    // Find a frame format the device answers, using a harmless GET. FiiO's
-    // current app sends a sequence number and CRC; its older app and devicePEQ
-    // send zeros there. Both are tried, current first.
+    // Find how this device wants frames carried, using a harmless GET
+    // (PEQ_COUNT). FiiO models with a numbered report (7) get the frame as the
+    // report. On an interface without report IDs (the BTR15's "EQ" interface),
+    // FiiO firmware may still expect the 07 as the first data byte, which is
+    // what it would receive on the wire from a report-7 device. Both frame
+    // formats are tried: FiiO's current one (sequence number and CRC) and the
+    // older one (zeros there).
     async probe() {
-      for (const framing of ["current", "legacy"]) {
-        this.link.framing = framing;
-        this.log?.info(framing === "current" ? "Probing with FiiO's current frame format (sequence number and CRC): GET PEQ_COUNT" : "No answer. Probing with the older frame format (sequence 00 00, checksum 00): GET PEQ_COUNT");
+      const L = this.link;
+      const base = L.reportId;
+      const variants = L.usesReportIds ? [
+        { reportId: base, prefix: [], framing: "current", why: `report ${base}, FiiO's current frame format` },
+        { reportId: base, prefix: [], framing: "legacy", why: `report ${base}, older frame format (sequence and checksum 00)` }
+      ] : [
+        { reportId: 0, prefix: [7], framing: "current", why: "no report IDs: 07 as the first data byte, current frame format" },
+        { reportId: 0, prefix: [7], framing: "legacy", why: "no report IDs: 07 as the first data byte, older frame format" },
+        { reportId: 0, prefix: [], framing: "current", why: "no report IDs: frame at byte 0, current frame format" },
+        { reportId: 0, prefix: [], framing: "legacy", why: "no report IDs: frame at byte 0, older frame format" },
+        { reportId: 7, prefix: [], framing: "current", why: "report 7, as FiiO's web app sends it (Chrome may refuse this)" }
+      ];
+      for (const [i, v] of variants.entries()) {
+        L.setEncoding(v);
+        this.log?.info(`Probe ${i + 1} of ${variants.length}: ${v.why}. GET PEQ_COUNT`);
         try {
-          const n = await this.readBandCount();
-          this.log?.info(`The device answers the ${framing} frame format; using it from now on.`);
-          return { framing, bandCount: n };
+          const f = await L.get(CMD.PEQ_COUNT, [], { retries: 1, timeoutMs: 600 });
+          this.log?.info(`PROBE RESULT: the device answers with ${v.why}. Using this from now on.`);
+          return { ...v, count: f.payload[0] };
         } catch (e) {
+          if (e.code === "send") {
+            this.log?.warn(`The browser refused to send this: ${e.message}`);
+            continue;
+          }
           if (e.code !== "timeout") throw e;
         }
       }
-      this.link.framing = "current";
+      L.setEncoding(variants[0]);
       return null;
     }
     // Everything readable without changing anything.
@@ -1760,11 +1799,18 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       }
       if (!p) {
         info.noAnswer = true;
-        this.log?.error("The device did not answer GET PEQ_COUNT in either frame format. Nothing further was sent.");
+        this.log?.error("The device did not answer GET PEQ_COUNT in any of the encodings tried. Nothing further was sent.");
         return info;
       }
       info.framing = p.framing;
-      info.bandCount = p.bandCount;
+      info.encoding = p.why;
+      if (!p.count || p.count > 32) {
+        info.bandCount = null;
+        info.errors = [`bandCount: the device reported an implausible band count (${p.count})`];
+      } else {
+        info.bandCount = p.count;
+        this.bandCount = p.count;
+      }
       await tryRead("firmware", () => this.readFirmware());
       await tryRead("eqSwitch", () => this.readEqSwitch());
       await tryRead("preset", () => this.readPreset());
@@ -1932,14 +1978,21 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         // send an all-zero report this often, like a device answering every USB poll
         legacyOnly: false,
         // only answer frames with sequence 00 00 and checksum 00; zeros otherwise
+        noReportIds: false,
+        // one 32-byte report without an ID, like the BTR15's "EQ" interface
+        wantsPrefix07: false,
+        // frames carried after a 07 byte, in both directions
         ...options
       };
+      this.reportId = this.options.noReportIds ? 0 : 7;
       this.productName = "FIIO BTR15 (simulated)";
       this.vendorId = 10610;
       this.productId = 3861;
       this.opened = false;
       this.oninputreport = null;
-      this.collections = [
+      this.collections = this.options.noReportIds ? [
+        { usagePage: 1, usage: 0, inputReports: [{ reportId: 0, items: [{ reportSize: 8, reportCount: 32 }] }], outputReports: [{ reportId: 0, items: [{ reportSize: 8, reportCount: 32 }] }], featureReports: [] }
+      ] : [
         { usagePage: 12, usage: 1, inputReports: [{ reportId: 1, items: [{ reportSize: 8, reportCount: 2 }] }], outputReports: [], featureReports: [] },
         { usagePage: 65280, usage: 1, inputReports: [{ reportId: 7, items: [{ reportSize: 8, reportCount: 63 }] }], outputReports: [{ reportId: 7, items: [{ reportSize: 8, reportCount: 63 }] }], featureReports: [] }
       ];
@@ -1984,7 +2037,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         if (!this.opened) return;
         const ev = new Event("inputreport");
         ev.data = new DataView(report.buffer);
-        ev.reportId = 7;
+        ev.reportId = this.reportId;
         ev.device = this;
         this.dispatchEvent(ev);
         this.oninputreport?.(ev);
@@ -1992,8 +2045,13 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     }
     async sendReport(reportId, data) {
       if (!this.opened) throw new Error("Device not open");
-      if (reportId !== 7) return;
-      const bytes = new Uint8Array(data.buffer ?? data, data.byteOffset ?? 0, data.byteLength ?? data.length);
+      if (this.options.noReportIds && reportId !== 0) throw new DOMException("Failed to write the report.", "NotAllowedError");
+      if (reportId !== this.reportId) return;
+      let bytes = new Uint8Array(data.buffer ?? data, data.byteOffset ?? 0, data.byteLength ?? data.length);
+      if (this.options.wantsPrefix07) {
+        if (bytes[0] !== 7) return;
+        bytes = bytes.subarray(1);
+      }
       const f = decodeFrame(bytes);
       this.received.push(f);
       if (!f.valid) return;
@@ -2063,8 +2121,8 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       const seq = this.options.echoSeq ? req.seq : 0;
       const body = [187, 11, seq >> 8 & 255, seq & 255, req.cmd, payload.length, ...payload];
       const frame = [...body, crc8(body), 238];
-      const report = new Uint8Array(63);
-      report.set(frame);
+      const report = new Uint8Array(this.options.noReportIds ? 32 : 63);
+      report.set(this.options.wantsPrefix07 ? [7, ...frame] : frame);
       this._emit(report);
     }
   };
@@ -2569,7 +2627,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       `BTR15 PEQ Writer ${APP_VERSION}  ${location.href}`,
       `Time ${(/* @__PURE__ */ new Date()).toISOString()}  ${navigator.userAgent}`,
       c ? `Device "${c.device.productName}" VID 0x${hex42(c.device.vendorId)} PID 0x${hex42(c.device.productId)}${c.sim ? " (SIMULATED)" : ""}` : "Device: none",
-      c ? `Link stats ${JSON.stringify(c.link.stats)} framing=${c.link.framing} seqEcho=${c.link.seqEcho} reportId=${c.link.reportId} padTo=${c.link.padTo}` : "",
+      c ? `Link stats ${JSON.stringify(c.link.stats)} framing=${c.link.framing} prefix=[${c.link.prefix.join(",")}] usesReportIds=${c.link.usesReportIds} seqEcho=${c.link.seqEcho} reportId=${c.link.reportId} padTo=${c.link.padTo}` : "",
       `Model ${state.model}  allowWrites=${$("allowWrites").checked}`,
       "----"
     ].filter(Boolean).join("\n");
@@ -2707,7 +2765,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       const ids = [...new Set((dev.collections ?? []).flatMap((c) => (c.outputReports ?? []).map((r) => r.reportId ?? 0)))];
       if (ids.length === 1) {
         reportId = ids[0];
-        log.warn(`The device lists no output report ${BTR15.reportId}; using its only output report, ${reportId}. Tell the developer.`);
+        log.info(`This interface has no output report ${BTR15.reportId}; its only output report is ${reportId}${reportId === 0 ? " (no report IDs)" : ""}. The connection probe tries the ways FiiO firmware may expect frames on it.`);
       } else {
         log.warn(`The device lists no output report ${BTR15.reportId} (it has: ${ids.join(", ") || "none"}). Trying ${reportId} anyway.`);
       }
@@ -2748,12 +2806,12 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       state.info = info;
       if (info.noAnswer) {
         setStatus("No answer from device", "bad");
-        await alertDlg("The BTR15 did not answer", `<p>The page asked for the band count in both of FiiO's frame formats and got no reply. Nothing was written.</p>
+        await alertDlg("The BTR15 did not answer", `<p>The page asked for the band count in every encoding it knows and got no reply. Nothing was written.</p>
         <p>Please press <b>Copy log</b> and paste it into the chat. Also check that FiiO Control and fiiocontrol.fiio.com are closed, then try unplugging and reconnecting.</p>`);
         return;
       }
       if (info.errors?.length) log.warn(`Some reads failed: ${info.errors.join("; ")}`);
-      log.info(`Frame format: ${info.framing}. Read: firmware ${info.firmware?.join(".") ?? "?"}, EQ switch ${info.eqSwitch === null ? "?" : info.eqSwitch ? "on" : "off"}, preset ${info.preset ?? "?"} (${info.preset != null ? slotName(info.preset) : "?"}), ${info.bandCount ?? "?"} bands, global gain ${info.globalGain ?? "?"} dB`);
+      log.info(`Encoding: ${info.encoding}. Read: firmware ${info.firmware?.join(".") ?? "?"}, EQ switch ${info.eqSwitch === null ? "?" : info.eqSwitch ? "on" : "off"}, preset ${info.preset ?? "?"} (${info.preset != null ? slotName(info.preset) : "?"}), ${info.bandCount ?? "?"} bands, global gain ${info.globalGain ?? "?"} dB`);
       if (info.bands && info.preset != null) {
         state.slots[info.preset] = { globalGain: info.globalGain, bands: info.bands, readAt: Date.now() };
         logSlot(info.preset, state.slots[info.preset]);
@@ -2777,7 +2835,7 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
     $("fSwitch").textContent = info?.eqSwitch == null ? "\u2013" : info.eqSwitch ? "On" : "Off";
     $("fPreset").textContent = info?.preset == null ? "\u2013" : `${slotName(info.preset)} (${info.preset})`;
     $("fBands").textContent = info?.bandCount ?? "\u2013";
-    $("fFraming").textContent = info?.noAnswer ? "no answer" : info?.framing === "legacy" ? "older (zeros)" : info?.framing ? "current (seq + CRC)" : "\u2013";
+    $("fFraming").textContent = info?.noAnswer ? "no answer" : info?.encoding ?? "\u2013";
     $("fGain").textContent = info?.globalGain == null ? "\u2013" : `${fmtG(info.globalGain)} dB`;
     const warn = [];
     if (!c.isBtr15) warn.push("This is not a BTR15, so writing is disabled.");
