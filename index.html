@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BTR15 PEQ Writer</title>
+<meta name="description" content="Write, read back and verify parametric EQ presets on a FiiO BTR15 over USB (WebHID), with auto-EQ fitting of AutoEQ files.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23256f6a'/%3E%3Cpath d='M4 20 C9 20 9 9 14 9 S19 23 24 23 S27 16 28 16' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <h1>BTR15 PEQ Writer</h1>
+    <span class="sub">parametric EQ for the FiiO BTR15, saved and verified over USB</span>
+  </div>
+  <div class="conn">
+    <span id="connStatus" class="chip">Not connected</span>
+    <button id="btnConnect" class="primary">Connect BTR15</button>
+    <button id="btnDemo" title="A simulated BTR15 inside the page, for trying things out">Demo device</button>
+    <button id="btnDisconnect" hidden>Disconnect</button>
+  </div>
+</header>
+
+<div id="noHid" class="banner warn" hidden>
+  This browser has no WebHID. Use Chrome or Edge on a desktop, from an https:// address or a local file.
+  The editor, fitting and exports still work without a device.
+</div>
+
+<main>
+  <!-- ── Device ─────────────────────────────────────────────── -->
+  <section id="secDevice" class="card">
+    <div class="card-head">
+      <h2>Device</h2>
+      <label class="switch" title="Off: the page only sends read (GET) commands. On: it may switch presets and write user slots.">
+        <input type="checkbox" id="allowWrites"> <span>Allow writing to the device</span>
+      </label>
+    </div>
+    <div id="devEmpty" class="muted">Plug in the BTR15 over USB, close FiiO's app and web page, then press <b>Connect BTR15</b>. Connecting only reads.</div>
+    <div id="devInfo" hidden>
+      <dl class="facts">
+        <div><dt>Model</dt><dd id="fModel">–</dd></div>
+        <div><dt>Firmware</dt><dd id="fFirmware">–</dd></div>
+        <div><dt>EQ switch</dt><dd id="fSwitch">–</dd></div>
+        <div><dt>Active preset</dt><dd id="fPreset">–</dd></div>
+        <div><dt>Bands</dt><dd id="fBands">–</dd></div>
+        <div><dt>Global gain</dt><dd id="fGain">–</dd></div>
+      </dl>
+      <div id="devWarn" class="banner warn" hidden></div>
+      <div class="row wrap">
+        <button id="btnReadLive">Read active preset</button>
+        <button id="btnReadSlots" data-write>Read USER1–3</button>
+        <label class="inline">Switch to
+          <select id="selPreset"></select>
+        </label>
+        <button id="btnSwitch" data-write>Switch</button>
+        <button id="btnEqSwitch" data-write hidden></button>
+      </div>
+      <div id="slotCards" class="slots"></div>
+    </div>
+  </section>
+
+  <!-- ── Editor ─────────────────────────────────────────────── -->
+  <section id="secEditor" class="card">
+    <div class="card-head">
+      <h2>EQ</h2>
+      <div class="row">
+        <button id="btnOpen">Open file…</button>
+        <button id="btnPaste">Paste…</button>
+        <button id="btnExample" title="AutoEQ GraphicEQ for the FiiO FT1">Load FT1 example</button>
+        <input type="file" id="fileInput" accept=".txt,.csv,.json,.tsv,text/plain" hidden>
+      </div>
+    </div>
+    <div id="dropZone" class="drop">
+      <div id="srcInfo" class="muted">Drop an EQ file here: AutoEQ GraphicEQ or ParametricEQ, Equalizer APO, an AutoEQ CSV, or a frequency/dB table. Or enter filters by hand below.</div>
+      <ul id="srcWarnings" class="warnings"></ul>
+    </div>
+    <div id="pasteBox" class="paste" hidden>
+      <textarea id="pasteText" rows="5" placeholder="Paste GraphicEQ, ParametricEQ or a frequency/dB table"></textarea>
+      <div class="row"><button id="btnPasteLoad" class="primary">Load</button><button id="btnPasteCancel">Cancel</button></div>
+    </div>
+
+    <details id="measBox" class="sub-card">
+      <summary>Make a target curve from a headphone measurement and a target (optional)</summary>
+      <p class="muted small">EQ = target − measurement, aligned over 200 Hz–2 kHz, smoothed (heavier above 8 kHz), boosts limited. A simple version of what AutoEQ does; for AutoEQ's full method use its own output files.</p>
+      <div class="row wrap">
+        <label class="inline">Measurement <input type="file" id="measFile" accept=".txt,.csv"></label>
+        <label class="inline">Target <input type="file" id="targetFile" accept=".txt,.csv"></label>
+        <label class="inline">Max boost <input type="number" id="measMaxBoost" value="6" min="0" max="12" step="0.5"> dB</label>
+        <button id="btnMakeCurve">Make curve</button>
+      </div>
+    </details>
+
+    <div class="grid2">
+      <div class="sub-card">
+        <h3>Auto-EQ</h3>
+        <div class="form">
+          <label>Bands <input type="number" id="optBands" value="10" min="1" max="10"></label>
+          <label>Filter types
+            <select id="optTypes">
+              <option value="PK,LS,HS">Peaks and shelves</option>
+              <option value="PK">Peaks only</option>
+            </select>
+          </label>
+          <label>Weight above 10 kHz <input type="number" id="optTreble" value="0.5" min="0" max="1" step="0.1"></label>
+          <label class="check"><input type="checkbox" id="optChain" checked> Keep the filters themselves at or below 0 dB</label>
+        </div>
+        <p class="muted small">The last option keeps every boost inside the filters' own sum, so nothing can clip whether the BTR15 applies its global gain before or after the filters.</p>
+        <button id="btnFit" class="primary">Fit filters to curve</button>
+        <span id="fitStatus" class="muted small"></span>
+      </div>
+      <div class="sub-card">
+        <h3>How the BTR15 shapes filters</h3>
+        <div class="radio-list" id="modelChoice">
+          <span class="muted small">Peaking filters</span>
+          <label><input type="radio" name="peakLaw" value="standard" checked> <span><b>As sent</b> (FiiO's app assumes this)</span></label>
+          <label><input type="radio" name="peakLaw" value="widen"> <span><b>Widened by A</b>: send Q × A, for firmware that realises Q ÷ A, A = 10<sup>|gain|/40</sup></span></label>
+          <span class="muted small">Shelves</span>
+          <label><input type="radio" name="shelfLaw" value="q" checked> <span><b>Q form</b> (AutoEQ, Equalizer APO LSC/HSC, FiiO's graph)</span></label>
+          <label><input type="radio" name="shelfLaw" value="slope"> <span><b>Slope form</b>: the number is taken as shelf slope S</span></label>
+        </div>
+        <p id="modelNote" class="small"></p>
+        <p class="muted small">The widening was measured by devicePEQ on other FiiO models, never on a BTR15. The <a href="#secListen">listening check</a> settles both questions by ear. Auto-EQ fits for whichever model is selected.</p>
+      </div>
+    </div>
+
+    <div id="graph" class="graph-wrap"></div>
+    <div id="legend" class="legend"></div>
+    <div id="fitStats" class="stats"></div>
+
+    <div class="table-wrap">
+      <table id="filterTable" class="filters">
+        <thead><tr><th>#</th><th>On</th><th>Type</th><th>Freq (Hz)</th><th>Gain (dB)</th><th>Q</th><th title="What will be written to the device">Sent to BTR15</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="row wrap">
+      <label class="inline">Global gain <input type="number" id="globalGain" value="0" step="0.1" min="-12" max="12"> dB</label>
+      <button id="btnAddFilter">Add filter</button>
+      <button id="btnSort">Sort by frequency</button>
+      <button id="btnClearFilters">Clear</button>
+      <span class="spacer"></span>
+      <button id="btnExportApo">Export Equalizer APO</button>
+      <button id="btnExportJson">Export preset JSON</button>
+    </div>
+    <ul id="filterWarnings" class="warnings"></ul>
+  </section>
+
+  <!-- ── Save ───────────────────────────────────────────────── -->
+  <section id="secSave" class="card">
+    <h2>Save to the BTR15</h2>
+    <div class="row wrap">
+      <label class="inline">Slot
+        <select id="saveSlot"><option value="7">USER1</option><option value="8">USER2</option><option value="9" selected>USER3</option></select>
+      </label>
+      <label class="check"><input type="checkbox" id="verifyStored" checked> Check what was stored (switches to another user slot and back)</label>
+      <button id="btnSave" class="primary" data-write>Save and verify</button>
+    </div>
+    <p class="muted small">Backs up the slot first, writes all bands and the global gain, reads each back, saves, and then reads the stored slot again. Backups are kept in this browser and in the log.</p>
+    <ol id="saveSteps" class="steps"></ol>
+    <div id="saveResult"></div>
+  </section>
+
+  <!-- ── Listening check ────────────────────────────────────── -->
+  <section id="secListen" class="card">
+    <h2>Listening check</h2>
+    <p>Answers by ear whether the BTR15 widens peaking filters. The page puts one strong cut on the BTR15 (live, not saved) and plays pink noise through the exact inverse of what each model predicts. The right model cancels the cut and sounds like the plain-noise reference; the wrong one leaves an audible colouration.</p>
+    <ol class="small">
+      <li>In Windows sound settings, make the BTR15 the output device. Turn off other EQ and sound effects (phone EQ, Windows enhancements).</li>
+      <li>Turn the volume down, then press Start and raise it to a comfortable level.</li>
+      <li>Switch between <b>R</b>, <b>A</b> and <b>B</b>. Which of A or B sounds exactly like R?</li>
+    </ol>
+    <div class="row wrap">
+      <label class="inline">Test
+        <select id="lsTest"><option value="peak">Peaking filter width</option><option value="shelf">Low-shelf convention</option></select>
+      </label>
+      <label class="inline">Use slot
+        <select id="lsSlot"><option value="7">USER1</option><option value="8">USER2</option><option value="9" selected>USER3</option></select>
+      </label>
+      <label class="check"><input type="checkbox" id="lsBlind" checked> Blind (A and B shuffled each round)</label>
+      <button id="btnLsStart" class="primary" data-write>Start</button>
+      <button id="btnLsStop" hidden>Finish and restore</button>
+    </div>
+    <div id="lsPanel" hidden>
+      <div class="row wrap ab">
+        <button class="ab-btn" data-cond="R">R · plain noise</button>
+        <button class="ab-btn" data-cond="A">A</button>
+        <button class="ab-btn" data-cond="B">B</button>
+        <button class="ab-btn" data-cond="D" title="The BTR15's cut with nothing in the browser: proves the device EQ is active">Device cut only</button>
+        <label class="inline">Level <input type="range" id="lsLevel" min="0" max="1" step="0.01" value="0.5"></label>
+      </div>
+      <div class="row wrap">
+        <span>Which matches R?</span>
+        <button data-answer="A">A matches</button>
+        <button data-answer="B">B matches</button>
+        <button data-answer="none">Neither / can't tell</button>
+      </div>
+      <div id="lsStatus" class="muted small"></div>
+      <div id="lsTally"></div>
+    </div>
+  </section>
+
+  <!-- ── Backups ────────────────────────────────────────────── -->
+  <section id="secBackups" class="card">
+    <div class="card-head">
+      <h2>Backups</h2>
+      <div class="row"><button id="btnBackupAll">Download all</button><button id="btnImportBackup">Restore from file…</button><input type="file" id="backupFile" accept=".json" hidden></div>
+    </div>
+    <div id="backupList" class="muted">No backups yet. One is made automatically before every write.</div>
+  </section>
+
+  <!-- ── Log ────────────────────────────────────────────────── -->
+  <section id="secLog" class="card">
+    <div class="card-head">
+      <h2>Log</h2>
+      <div class="row">
+        <button id="btnCopyLog" class="primary">Copy log</button>
+        <button id="btnSaveLog">Download</button>
+        <button id="btnClearLog">Clear</button>
+      </div>
+    </div>
+    <p class="muted small">Every frame sent and received, decoded. When something goes wrong, copy this and paste it into the chat.</p>
+    <pre id="log" class="log" tabindex="0"></pre>
+  </section>
+</main>
+
+<footer>
+  <span id="version"></span> · MIT licence · Not affiliated with FiiO. Protocol notes and sources in <a href="docs/PROTOCOL.md">docs/PROTOCOL.md</a>.
+</footer>
+
+<dialog id="confirmDlg">
+  <form method="dialog">
+    <h3 id="confirmTitle">Confirm</h3>
+    <div id="confirmBody"></div>
+    <div class="row end"><button value="cancel">Cancel</button><button value="ok" class="primary" id="confirmOk">Continue</button></div>
+  </form>
+</dialog>
+
+<script type="module" src="app/main.js"></script>
+</body>
+</html>
