@@ -1,14 +1,17 @@
 # BTR15 PEQ Writer
 
-A web page that saves parametric EQ presets to a **FiiO BTR15** over USB, then
+A web page that saves parametric EQ presets to a **FiiO BTR15** over Bluetooth, then
 reads them back and checks they were stored as written. It also turns EQ files
 (AutoEQ GraphicEQ and ParametricEQ, Equalizer APO, CSV) into presets the BTR15 can
 actually hold.
 
-It runs in Chrome or Edge on a desktop (WebHID). There is nothing to install.
+It runs in Chrome or Edge on a desktop with Bluetooth (Web Bluetooth). There is
+nothing to install.
 
-> Not affiliated with FiiO. The BTR15 support is built from FiiO's own web app tables
-> and has not yet been verified on real hardware. See [docs/TESTING.md](docs/TESTING.md).
+> Not affiliated with FiiO. The protocol comes from studying FiiO Control for Android
+> (Qualcomm GAIA over BLE) and FiiO's web app. It has not yet been verified on real
+> hardware; see [docs/TESTING.md](docs/TESTING.md). The BTR15's USB control interface
+> did not answer on a real unit, so USB is kept only as an experimental option.
 
 ## Use
 
@@ -17,7 +20,8 @@ It runs in Chrome or Edge on a desktop (WebHID). There is nothing to install.
   and open it in Chrome or Edge. WebHID works from a local file.
 * **From a checkout:** `npm run serve`, then open http://localhost:8080/.
 
-1. Plug in the BTR15 and press **Connect BTR15**. Connecting only reads.
+1. Turn the BTR15 on, close FiiO Control on your phone, and press **Connect BTR15**.
+   Pick it in the Bluetooth list. Connecting only reads.
 2. Load an EQ file, or press **Load FT1 example**, then press **Fit filters to curve**.
    Or type filters into the table by hand.
 3. Tick **Allow writing to the device**, choose USER1–3 and press **Save and verify**.
@@ -26,10 +30,10 @@ It runs in Chrome or Edge on a desktop (WebHID). There is nothing to install.
 
 ## What it does differently from FiiO's app
 
-* **Safe by construction.** Only seven read and write commands can be encoded. Resets,
-  factory reset (`0x21` in FiiO's current code), set-band-count and anything unknown
-  throw before a byte is sent. Nothing but GET commands is sent until you tick
-  **Allow writing**. Only USER1–3 can be written.
+* **Safe by construction.** Only the read and write commands it needs can be encoded.
+  FiiO's "reset preset" and rename (over Bluetooth), resets and factory reset (over
+  USB), and anything unknown throw before a byte is sent. Nothing but read commands
+  is sent until you tick **Allow writing**. Only USER1–3 can be written.
 * **Backs up before every write.** The slot is read and kept in browser storage and in
   the log, and can be restored.
 * **Verifies.** Every band is read back after it is written. After saving, the page
@@ -74,10 +78,13 @@ blind, with A and B shuffled, and reports how likely your answers are by chance.
 ```
 index.html          the page
 app/main.js         UI wiring
-app/protocol.js     frame format, CRC, command allowlist, BTR15 tables
-app/device.js       WebHID transport: queue, reply matching, retries, log
+app/protocol.js     USB frame format, CRC, command allowlist, BTR15 USB tables
+app/gaia.js         Bluetooth protocol: GAIA framing, command allowlist, BTR15 tables
+app/ble.js          Web Bluetooth transport: queue, reply matching, retries, log
+app/btr15bt.js      BTR15 operations over Bluetooth
+app/device.js       WebHID transport (experimental USB path)
 app/btr15.js        read / backup / write / save / verify sequences
-app/sim.js          simulated BTR15 (demo mode and tests)
+app/sim.js          simulated BTR15 over Bluetooth and USB (demo mode and tests)
 app/dsp.js          cookbook biquads, responses, device models
 app/fit.js          auto-EQ fitter; measurement + target curve
 app/formats.js      importers and exporters

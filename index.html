@@ -12,18 +12,19 @@
 <header class="topbar">
   <div class="brand">
     <h1>BTR15 PEQ Writer</h1>
-    <span class="sub">parametric EQ for the FiiO BTR15, saved and verified over USB</span>
+    <span class="sub">parametric EQ for the FiiO BTR15, saved and verified over Bluetooth</span>
   </div>
   <div class="conn">
     <span id="connStatus" class="chip">Not connected</span>
     <button id="btnConnect" class="primary">Connect BTR15</button>
+    <button id="btnConnectUsb" title="Experimental: no FiiO software answers on the BTR15's USB control interface yet">USB (experimental)</button>
     <button id="btnDemo" title="A simulated BTR15 inside the page, for trying things out">Demo device</button>
     <button id="btnDisconnect" hidden>Disconnect</button>
   </div>
 </header>
 
-<div id="noHid" class="banner warn" hidden>
-  This browser has no WebHID. Use Chrome or Edge on a desktop, from an https:// address or a local file.
+<div id="noBt" class="banner warn" hidden>
+  This browser has no Web Bluetooth. Use Chrome or Edge on a desktop, from an https:// address or a local file.
   The editor, fitting and exports still work without a device.
 </div>
 
@@ -32,11 +33,11 @@
   <section id="secDevice" class="card">
     <div class="card-head">
       <h2>Device</h2>
-      <label class="switch" title="Off: the page only sends read (GET) commands. On: it may switch presets and write user slots.">
+      <label class="switch" title="Off: the page only sends read commands. On: it may switch presets and write user presets.">
         <input type="checkbox" id="allowWrites"> <span>Allow writing to the device</span>
       </label>
     </div>
-    <div id="devEmpty" class="muted">Plug in the BTR15 over USB, close FiiO's app and web page, then press <b>Connect BTR15</b>. Connecting only reads.</div>
+    <div id="devEmpty" class="muted">Turn the BTR15 on, close FiiO Control on your phone, then press <b>Connect BTR15</b> and pick it in the Bluetooth list. Connecting only reads. (FiiO's own app also talks to the BTR15 over Bluetooth; its USB control interface does not answer yet.)</div>
     <div id="devInfo" hidden>
       <dl class="facts">
         <div><dt>Model</dt><dd id="fModel">–</dd></div>
@@ -45,7 +46,7 @@
         <div><dt>Active preset</dt><dd id="fPreset">–</dd></div>
         <div><dt>Bands</dt><dd id="fBands">–</dd></div>
         <div><dt>Global gain</dt><dd id="fGain">–</dd></div>
-        <div><dt>Frame format</dt><dd id="fFraming">–</dd></div>
+        <div><dt>Link</dt><dd id="fFraming">–</dd></div>
       </dl>
       <div id="devWarn" class="banner warn" hidden></div>
       <div class="row wrap">
@@ -152,12 +153,12 @@
     <h2>Save to the BTR15</h2>
     <div class="row wrap">
       <label class="inline">Slot
-        <select id="saveSlot"><option value="7">USER1</option><option value="8">USER2</option><option value="9" selected>USER3</option></select>
+        <select id="saveSlot"></select>
       </label>
       <label class="check"><input type="checkbox" id="verifyStored" checked> Check what was stored (switches to another user slot and back)</label>
       <button id="btnSave" class="primary" data-write>Save and verify</button>
     </div>
-    <p class="muted small">Backs up the slot first, writes all bands and the global gain, reads each back, saves, and then reads the stored slot again. Backups are kept in this browser and in the log.</p>
+    <p class="muted small">Backs up the preset first, writes all bands and the global gain, reads each back, then switches away and back and reads the stored preset again. Backups are kept in this browser and in the log.</p>
     <ol id="saveSteps" class="steps"></ol>
     <div id="saveResult"></div>
   </section>
@@ -167,7 +168,7 @@
     <h2>Listening check</h2>
     <p>Answers by ear whether the BTR15 widens peaking filters. The page puts one strong cut on the BTR15 (live, not saved) and plays pink noise through the exact inverse of what each model predicts. The right model cancels the cut and sounds like the plain-noise reference; the wrong one leaves an audible colouration.</p>
     <ol class="small">
-      <li>In Windows sound settings, make the BTR15 the output device. Turn off other EQ and sound effects (phone EQ, Windows enhancements).</li>
+      <li>Play this page's sound through the BTR15: make it the Windows output device (over USB or Bluetooth audio). Turn off other EQ and sound effects (phone EQ, Windows enhancements).</li>
       <li>Turn the volume down, then press Start and raise it to a comfortable level.</li>
       <li>Switch between <b>R</b>, <b>A</b> and <b>B</b>. Which of A or B sounds exactly like R?</li>
     </ol>
@@ -176,7 +177,7 @@
         <select id="lsTest"><option value="peak">Peaking filter width</option><option value="shelf">Low-shelf convention</option></select>
       </label>
       <label class="inline">Use slot
-        <select id="lsSlot"><option value="7">USER1</option><option value="8">USER2</option><option value="9" selected>USER3</option></select>
+        <select id="lsSlot"></select>
       </label>
       <label class="check"><input type="checkbox" id="lsBlind" checked> Blind (A and B shuffled each round)</label>
       <button id="btnLsStart" class="primary" data-write>Start</button>

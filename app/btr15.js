@@ -213,7 +213,7 @@ export class Btr15 {
     const live = await this.writeLiveVerified(values, { onProgress: (i) => onStep('write', `Wrote band ${i + 1} of ${n}`) });
     if (live.length) return { ok: false, stage: 'write', problems: live, backup, previousPreset: before };
 
-    onStep('save', `Saving into ${this.slotName(slot)}`);
+    onStep('save', this.hasSaveCommand === false ? 'No save command over Bluetooth: values are stored as they are written' : `Saving into ${this.slotName(slot)}`);
     const ack = await this.save(slot);
     await sleep(500);
 

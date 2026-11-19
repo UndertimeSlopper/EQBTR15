@@ -3,6 +3,7 @@
 // real device, so it proves the app is self-consistent, not that the BTR15
 // behaves this way. Optional faults reproduce reported FiiO problems.
 
+import { GAIA_SERVICE, GAIA_COMMAND, GAIA_RESPONSE, BT, decodeGaia, encodeBandBt, decodeBandBt, encodeGainBt, decodeGainBt } from './gaia.js';
 import { CMD, crc8, decodeFrame, encodeBand, decodeBand, encodeGain, decodeGain, decodeUint, encodeUint, BTR15 } from './protocol.js';
 
 const flat = () => BTR15.defaultFreqs.map((freq, index) => ({ index, type: 'PK', freq, gain: 0, q: 1 }));
@@ -140,3 +141,107 @@ export class SimulatedBtr15 extends EventTarget {
 }
 
 function clone(x) { return JSON.parse(JSON.stringify(x)); }
+
+// ── Simulated BTR15 over Bluetooth (GAIA) ───────────────────────────────────
+// Implements the small part of Web Bluetooth that BleLink uses.
+
+export class SimulatedBtr15Ble extends EventTarget {
+  constructor(options = {}) {
+    super();
+    this.options = { firmware: [4, 4], latencyMs: 6, dropReplyEvery: 0, shelvesRevert: false, ...options };
+    this.name = 'FiiO BTR15 (simulated)';
+    this.id = 'sim-btr15';
+    this.connected = false;
+    this.received = [];
+    const flatBands = () => BTR15_BT_FREQS.map((freq, index) => ({ index, type: 'PK', freq, gain: 0, q: 1 }));
+    this.custom = [
+      { globalGain: -3, bands: [{ index: 0, type: 'LS', freq: 105, gain: 4, q: 0.7 }, { index: 1, type: 'PK', freq: 200, gain: -2.5, q: 1.1 }, { index: 2, type: 'PK', freq: 3200, gain: -3, q: 4 }, ...flatBands().slice(3)] },
+      { globalGain: 0, bands: flatBands() },
+      { globalGain: 0, bands: flatBands() },
+    ];
+    this.preset = 4;
+    this.eqSwitch = 1;
+    this.replyCount = 0;
+    const sim = this;
+    this.respChar = new (class extends EventTarget {
+      constructor() { super(); this.uuid = GAIA_RESPONSE; this.properties = { notify: true }; }
+      async startNotifications() { return this; }
+    })();
+    this.cmdChar = {
+      uuid: GAIA_COMMAND,
+      properties: { write: true, writeWithoutResponse: false },
+      writeValueWithResponse: async (bytes) => sim._handle(new Uint8Array(bytes.buffer ?? bytes, bytes.byteOffset ?? 0, bytes.byteLength ?? bytes.length)),
+    };
+    const service = {
+      uuid: GAIA_SERVICE,
+      getCharacteristic: async (uuid) => {
+        if (uuid === GAIA_COMMAND) return sim.cmdChar;
+        if (uuid === GAIA_RESPONSE) return sim.respChar;
+        throw new DOMException('No characteristic', 'NotFoundError');
+      },
+    };
+    this.gatt = {
+      get connected() { return sim.connected; },
+      connect: async () => { sim.connected = true; return { getPrimaryService: async (uuid) => { if (uuid !== GAIA_SERVICE) throw new DOMException('No service', 'NotFoundError'); return service; } }; },
+      disconnect: () => { sim.connected = false; sim.dispatchEvent(new Event('gattserverdisconnected')); },
+    };
+  }
+
+  _reply(cmd, status, data) {
+    this.replyCount++;
+    if (this.options.dropReplyEvery && this.replyCount % this.options.dropReplyEvery === 0) return;
+    const bytes = Uint8Array.from([0x00, 0x0A, 0x84, (cmd >> 8) & 0xFF, status, cmd & 0xFF, ...data]);
+    setTimeout(() => {
+      if (!this.connected) return;
+      const ev = new Event('characteristicvaluechanged');
+      Object.defineProperty(ev, 'target', { value: { value: new DataView(bytes.buffer) } });
+      this.respChar.dispatchEvent(ev);
+    }, this.options.latencyMs);
+  }
+
+  _handle(bytes) {
+    if (!this.connected) throw new DOMException('GATT Server is disconnected', 'NetworkError');
+    const f = decodeGaia(bytes);
+    this.received.push(f);
+    if (!f.valid || f.kind !== 'request') return;
+    const d = f.data;
+    const ci = { 4: 0, 8: 1, 9: 2 }[this.preset];
+    const withType = this.options.firmware[0] + this.options.firmware[1] / 10 >= 2.5;
+    switch (f.cmd) {
+      case BT.VERSION: return this._reply(f.cmd, 0, this.options.firmware);
+      case BT.BATTERY: return this._reply(f.cmd, 0, [80]);
+      case BT.EQ_SWITCH: return this._reply(f.cmd, 0, [this.eqSwitch]);
+      case BT.PRESET: return this._reply(f.cmd, 0, [this.preset]);
+      case BT.BAND: {
+        const p = this.custom[d[0]];
+        const b = p?.bands[d[1]];
+        if (!b) return this._reply(f.cmd, 1, []);
+        return this._reply(f.cmd, 0, encodeBandBt(d[0], b, { withType }));
+      }
+      case BT.GLOBAL_GAIN: {
+        const p = this.custom[d[0]];
+        if (!p) return this._reply(f.cmd, 1, []);
+        return this._reply(f.cmd, 0, encodeGainBt(d[0], p.globalGain));
+      }
+      case BT.SET_PRESET: if (d[0] <= 9) this.preset = d[0]; return this._reply(f.cmd, 0, []);
+      case BT.SET_EQ_SWITCH: this.eqSwitch = d[0] ? 1 : 0; return this._reply(f.cmd, 0, []);
+      case BT.SET_BAND: {
+        const b = decodeBandBt(withType ? d : [...d, 0]);
+        const p = this.custom[b.customIndex];
+        if (!p || ci !== b.customIndex) return this._reply(f.cmd, 1, []);
+        p.bands[b.index] = { index: b.index, type: this.options.shelvesRevert ? 'PK' : b.type, freq: b.freq, gain: b.gain, q: b.q };
+        return this._reply(f.cmd, 0, []);
+      }
+      case BT.SET_GLOBAL_GAIN: {
+        const x = decodeGainBt(d);
+        const p = this.custom[x.customIndex];
+        if (!p) return this._reply(f.cmd, 1, []);
+        p.globalGain = x.gain;
+        return this._reply(f.cmd, 0, []);
+      }
+      default: return this._reply(f.cmd, 1, []);
+    }
+  }
+}
+
+const BTR15_BT_FREQS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];

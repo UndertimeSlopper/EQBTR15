@@ -7,7 +7,10 @@ import { fitPeq, fitStats, quantizeSent, equalizationCurve, BTR15_LIMITS } from 
 import { BTR15, FIIO_VENDOR_ID, slotName } from './protocol.js';
 import { FiioLink, pickControlInterface, summarizeCollections, hasOutputReport } from './device.js';
 import { Btr15, toDeviceBands, fmtBand, compareValues } from './btr15.js';
-import { SimulatedBtr15 } from './sim.js';
+import { SimulatedBtr15Ble } from './sim.js';
+import { BleLink } from './ble.js';
+import { Btr15Bt } from './btr15bt.js';
+import { BTR15_BT, GAIA_SERVICE, BT } from './gaia.js';
 import { TrafficLog } from './log.js';
 import { ResponseGraph } from './graph.js';
 import { LISTEN_TESTS, NoiseEngine } from './listen.js';
@@ -18,6 +21,10 @@ export const APP_VERSION = '0.1.0';
 const $ = (id) => document.getElementById(id);
 const log = new TrafficLog();
 const grid = new FreqGrid({ fmin: 20, fmax: 20000, pointsPerOctave: 48 });
+// The active device's profile (slot numbers differ between USB and Bluetooth).
+const prof = () => state.conn?.btr.profile ?? BTR15_BT;
+const sname = (id) => slotName(id, prof());
+const devName = (d) => d?.productName ?? d?.name ?? 'device';
 
 const state = {
   conn: null,        // { device, link, btr, sim, isBtr15 }
@@ -52,8 +59,12 @@ function logHeader() {
   return [
     `BTR15 PEQ Writer ${APP_VERSION}  ${location.href}`,
     `Time ${new Date().toISOString()}  ${navigator.userAgent}`,
-    c ? `Device "${c.device.productName}" VID 0x${hex4(c.device.vendorId)} PID 0x${hex4(c.device.productId)}${c.sim ? ' (SIMULATED)' : ''}` : 'Device: none',
-    c ? `Link stats ${JSON.stringify(c.link.stats)} framing=${c.link.framing} prefix=[${c.link.prefix.join(',')}] usesReportIds=${c.link.usesReportIds} seqEcho=${c.link.seqEcho} reportId=${c.link.reportId} padTo=${c.link.padTo}` : '',
+    !c ? 'Device: none' : c.transport === 'bluetooth'
+      ? `Device "${devName(c.device)}" over Bluetooth${c.sim ? ' (SIMULATED)' : ''}`
+      : `Device "${devName(c.device)}" over USB VID 0x${hex4(c.device.vendorId)} PID 0x${hex4(c.device.productId)}${c.sim ? ' (SIMULATED)' : ''}`,
+    !c ? '' : c.transport === 'bluetooth'
+      ? `Link stats ${JSON.stringify(c.link.stats)} firmware=${c.btr.firmware?.join('.') ?? '?'} typeByte=${c.btr.withType}`
+      : `Link stats ${JSON.stringify(c.link.stats)} framing=${c.link.framing} prefix=[${c.link.prefix.join(',')}] usesReportIds=${c.link.usesReportIds} seqEcho=${c.link.seqEcho} reportId=${c.link.reportId} padTo=${c.link.padTo}`,
     `Model ${state.model}  allowWrites=${$('allowWrites').checked}`,
     '----',
   ].filter(Boolean).join('\n');
@@ -79,12 +90,15 @@ function updateControls() {
   const connected = !!state.conn && !state.conn.link.closed;
   for (const b of document.querySelectorAll('[data-write]')) b.disabled = !canWrite();
   $('btnReadLive').disabled = !connected || state.busy;
+  if (state.conn?.btr.readsSlotsDirectly) $('btnReadSlots').disabled = !connected || state.busy || !!state.info?.noAnswer;
   $('btnConnect').hidden = connected;
+  $('btnConnectUsb').hidden = connected;
   $('btnDemo').hidden = connected;
   $('btnDisconnect').hidden = !connected;
   $('btnLsStop').disabled = state.busy && !ls.active;
   if (ls.active) $('btnLsStart').disabled = true;
   for (const b of document.querySelectorAll('.slot [data-write]')) b.disabled = !canWrite();
+  for (const b of document.querySelectorAll('.slot [data-read]')) b.disabled = !connected || state.busy;
 }
 $('allowWrites').onchange = () => {
   if ($('allowWrites').checked) log.info('Writing to the device is now ALLOWED for this page session.');
@@ -123,13 +137,16 @@ function connLabel() {
   const c = state.conn;
   if (!c) return 'Not connected';
   if (c.link.closed) return 'Disconnected';
-  return `${c.sim ? 'Demo: ' : ''}${c.device.productName}`;
+  return `${c.sim ? 'Demo: ' : ''}${devName(c.device)}${c.transport === 'bluetooth' ? ' (Bluetooth)' : ' (USB)'}`;
 }
 
 // ── Connecting ──────────────────────────────────────────────────────────────
-if (!('hid' in navigator)) {
-  $('noHid').hidden = false;
+if (!('bluetooth' in navigator)) {
+  $('noBt').hidden = false;
   $('btnConnect').disabled = true;
+}
+if (!('hid' in navigator)) {
+  $('btnConnectUsb').disabled = true;
 } else {
   navigator.hid.addEventListener('disconnect', (e) => {
     if (state.conn && !state.conn.sim && e.device === state.conn.device) {
@@ -154,7 +171,73 @@ if (!('hid' in navigator)) {
   });
 }
 
+// ── Bluetooth (the way FiiO Control talks to the BTR15) ─────────────────────
 $('btnConnect').onclick = async () => {
+  let device;
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'FiiO BTR15' }, { namePrefix: 'FIIO BTR15' }, { namePrefix: 'BTR15' }, { services: [GAIA_SERVICE] }],
+      optionalServices: [GAIA_SERVICE],
+    });
+  } catch (e) {
+    if (e.name === 'NotFoundError') {
+      log.info(`No Bluetooth device chosen (${e.message}).`);
+      const all = await confirmDlg('BTR15 not in the list?', `<p>If the BTR15 did not appear, it may not be advertising its name. You can list every nearby Bluetooth device instead and pick it from there.</p>
+        <p>Also check: the BTR15 is on, Bluetooth is on in Windows, and FiiO Control on your phone is closed (its connection can keep the BTR15 busy).</p>`, 'Show all devices');
+      if (!all) return;
+      try {
+        device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [GAIA_SERVICE] });
+      } catch (e2) { log.info(`No Bluetooth device chosen (${e2.message}).`); return; }
+    } else {
+      log.error(`Bluetooth chooser failed: ${e.name}: ${e.message}`);
+      if (e.name === 'SecurityError' || /origin|file/i.test(e.message)) {
+        await alertDlg('Bluetooth not allowed here', `<p>The browser refused Bluetooth access for this page (${esc(e.message)}). Some browsers do not allow Web Bluetooth from a local file. Open the hosted copy of this page instead (https address), or tell the developer.</p>`);
+      } else if (e.name === 'NotAllowedError' || /globally disabled|adapter not available|Bluetooth adapter/i.test(e.message)) {
+        await alertDlg('Bluetooth unavailable', `<p>${esc(e.message)}</p><p>Check that Bluetooth is turned on in Windows settings.</p>`);
+      }
+      return;
+    }
+  }
+  await openBle(device);
+};
+
+$('btnDemo').onclick = async () => {
+  log.info('Connecting to the SIMULATED BTR15 over simulated Bluetooth (nothing here touches real hardware).');
+  await openBle(new SimulatedBtr15Ble(), { sim: true });
+};
+
+async function openBle(device, { sim = false } = {}) {
+  if (state.conn) { try { await state.conn.link.close(); } catch { /* ignore */ } }
+  const profile = sim ? { ...BTR15_BT, presetSwitchDelayMs: 150 } : BTR15_BT;
+  const link = new BleLink(device, { log, profile });
+  try {
+    await link.open();
+  } catch (e) {
+    log.error(`Could not connect over Bluetooth: ${e.message}`);
+    await alertDlg('Could not connect over Bluetooth', `<p>${esc(e.message)}</p><p>Close FiiO Control on your phone (or turn the phone's Bluetooth off for a moment), make sure the BTR15 is on, and try again.</p>`);
+    return;
+  }
+  const isBtr15 = sim || /BTR15/i.test(device.name ?? '');
+  const btr = new Btr15Bt(link, { profile, log });
+  state.conn = { device, link, btr, sim, isBtr15, transport: 'bluetooth' };
+  state.slots = {};
+  link.onDisconnect = () => {
+    setStatus('Bluetooth disconnected', 'bad');
+    if (ls.active) lsAbort('The Bluetooth connection dropped during the listening check.');
+    renderDevice();
+    updateControls();
+  };
+  link.onUnsolicited((f) => {
+    if (f.cmd === BT.PRESET && f.data?.length && state.info) { state.info.preset = f.data[0]; renderDevice(); }
+  });
+  if (!isBtr15) log.warn(`"${devName(device)}" does not look like a BTR15. Reading is allowed; writing stays disabled.`);
+  setStatus(connLabel(), 'ok');
+  updateControls();
+  await identify();
+}
+
+// ── USB (experimental: no FiiO software answers on the BTR15's USB interface yet)
+$('btnConnectUsb').onclick = async () => {
   let devices;
   try {
     devices = await navigator.hid.requestDevice({ filters: [{ vendorId: FIIO_VENDOR_ID }] });
@@ -164,12 +247,6 @@ $('btnConnect').onclick = async () => {
   }
   if (!devices.length) { log.info('No device chosen.'); return; }
   await openDevice(devices);
-};
-
-$('btnDemo').onclick = async () => {
-  const sim = new SimulatedBtr15();
-  log.info('Connecting to the SIMULATED BTR15 (nothing here touches real hardware).');
-  await openDevice([sim], { sim: true });
 };
 
 $('btnDisconnect').onclick = async () => {
@@ -217,7 +294,7 @@ async function openDevice(devices, { sim = false, auto = false } = {}) {
     return;
   }
   const btr = new Btr15(link, { profile, log });
-  state.conn = { device: dev, link, btr, sim, isBtr15 };
+  state.conn = { device: dev, link, btr, sim, isBtr15, transport: 'usb' };
   state.lastDevice = sim ? null : { vendorId: dev.vendorId, productId: dev.productId };
   state.slots = {};
   link.onUnsolicited((f) => {
@@ -235,12 +312,18 @@ async function identify(auto = false) {
     state.info = info;
     if (info.noAnswer) {
       setStatus('No answer from device', 'bad');
-      await alertDlg('The BTR15 did not answer', `<p>The page asked for the band count in every encoding it knows and got no reply. Nothing was written.</p>
+      await alertDlg('The BTR15 did not answer', state.conn.transport === 'bluetooth'
+        ? `<p>The BTR15 accepted the Bluetooth connection but did not answer the version request. Nothing was written.</p><p>Please press <b>Copy log</b> and paste it into the chat. Closing FiiO Control on your phone may help.</p>`
+        : `<p>The page asked for the band count in every encoding it knows and got no reply. Nothing was written.</p>
         <p>Please press <b>Copy log</b> and paste it into the chat. Also check that FiiO Control and fiiocontrol.fiio.com are closed, then try unplugging and reconnecting.</p>`);
       return;
     }
     if (info.errors?.length) log.warn(`Some reads failed: ${info.errors.join('; ')}`);
-    log.info(`Encoding: ${info.encoding}. Read: firmware ${info.firmware?.join('.') ?? '?'}, EQ switch ${info.eqSwitch === null ? '?' : info.eqSwitch ? 'on' : 'off'}, preset ${info.preset ?? '?'} (${info.preset != null ? slotName(info.preset) : '?'}), ${info.bandCount ?? '?'} bands, global gain ${info.globalGain ?? '?'} dB`);
+    log.info(`Encoding: ${info.encoding}. Read: firmware ${info.firmware?.join('.') ?? '?'}, EQ switch ${info.eqSwitch === null ? '?' : info.eqSwitch ? 'on' : 'off'}, preset ${info.preset ?? '?'} (${info.preset != null ? sname(info.preset) : '?'}), ${info.bandCount ?? '?'} bands, global gain ${info.globalGain ?? '?'} dB`);
+    if (info.battery != null) log.info(`Battery ${info.battery}%.`);
+    if (info.preset != null && !info.bands && c0() && state.conn.transport === 'bluetooth' && state.conn.btr.customIndexOf(info.preset) === null) {
+      log.info(`The active preset (${sname(info.preset)}) is a built-in one; its bands are not readable over Bluetooth. Press "Read USER1–3" to read the user presets.`);
+    }
     if (info.bands && info.preset != null) {
       state.slots[info.preset] = { globalGain: info.globalGain, bands: info.bands, readAt: Date.now() };
       logSlot(info.preset, state.slots[info.preset]);
@@ -258,10 +341,10 @@ function renderDevice() {
   $('devEmpty').hidden = !!c;
   $('devInfo').hidden = !c;
   if (!c) { $('slotCards').replaceChildren(); return; }
-  $('fModel').textContent = c.device.productName;
+  $('fModel').textContent = `${devName(c.device)} (${c.transport === 'bluetooth' ? 'Bluetooth' : 'USB'})`;
   $('fFirmware').textContent = info?.firmware?.join('.') ?? '–';
   $('fSwitch').textContent = info?.eqSwitch == null ? '–' : info.eqSwitch ? 'On' : 'Off';
-  $('fPreset').textContent = info?.preset == null ? '–' : `${slotName(info.preset)} (${info.preset})`;
+  $('fPreset').textContent = info?.preset == null ? '–' : `${sname(info.preset)} (${info.preset})`;
   $('fBands').textContent = info?.bandCount ?? '–';
   $('fFraming').textContent = info?.noAnswer ? 'no answer' : info?.encoding ?? '–';
   $('fGain').textContent = info?.globalGain == null ? '–' : `${fmtG(info.globalGain)} dB`;
@@ -269,9 +352,12 @@ function renderDevice() {
   const warn = [];
   if (!c.isBtr15) warn.push('This is not a BTR15, so writing is disabled.');
   if (info?.noAnswer) warn.push('The device did not answer. Copy the log and paste it into the chat.');
-  if (info?.eqSwitch === 0) warn.push('The BTR15 reports its EQ switch as OFF, so no preset is audible. Turn it on from the device or with the button below. FiiO says the BTR15 re-connects over USB when EQ is toggled, so audio may drop for a moment.');
-  if (info?.bandCount && info.bandCount !== BTR15.expectedBands) warn.push(`The device reports ${info.bandCount} bands; FiiO's app assumes ${BTR15.expectedBands}.`);
-  if (info?.preset != null && !BTR15.slots.some((s) => s.id === info.preset)) warn.push(`Active preset ${info.preset} is not in FiiO's BTR15 table.`);
+  if (info?.eqSwitch === 0) warn.push(c.transport === 'bluetooth'
+    ? 'The BTR15 reports its EQ as OFF, so no preset is audible. Turn it on from FiiO Control, the device, or the button below.'
+    : 'The BTR15 reports its EQ switch as OFF, so no preset is audible. Turn it on from the device or with the button below. FiiO says the BTR15 re-connects over USB when EQ is toggled, so audio may drop for a moment.');
+  if (c.transport === 'bluetooth' && c.btr.firmware && !c.btr.withType) warn.push(`Firmware ${c.btr.firmware.join('.')} is older than 2.5: FiiO sends no filter type to it, so only peak filters can be stored. Use "Peaks only" when fitting.`);
+  if (info?.bandCount && info.bandCount !== prof().expectedBands) warn.push(`The device reports ${info.bandCount} bands; FiiO's app assumes ${prof().expectedBands}.`);
+  if (info?.preset != null && !prof().slots.some((s) => s.id === info.preset)) warn.push(`Active preset ${info.preset} is not in FiiO's BTR15 table.`);
   $('devWarn').hidden = !warn.length;
   $('devWarn').innerHTML = warn.map(esc).join('<br>');
 
@@ -281,11 +367,13 @@ function renderDevice() {
 
   const sel = $('selPreset');
   const keep = sel.value;
-  sel.replaceChildren(...BTR15.slots.map((s) => new Option(`${s.name} (${s.id})`, s.id)));
-  sel.value = keep || (info?.preset ?? 7);
+  sel.replaceChildren(...prof().slots.map((s) => new Option(`${s.name} (${s.id})`, s.id)));
+  sel.value = keep && prof().slots.some((x) => String(x.id) === keep) ? keep : (info?.preset ?? prof().userSlots[0]);
+  fillSlotSelect($('saveSlot'), 2);
+  fillSlotSelect($('lsSlot'), 2);
 
-  const cards = BTR15.userSlots.map((id) => slotCard(id));
-  if (info?.preset != null && !BTR15.userSlots.includes(info.preset) && state.slots[info.preset]) cards.unshift(slotCard(info.preset));
+  const cards = prof().userSlots.map((id) => slotCard(id));
+  if (info?.preset != null && !prof().userSlots.includes(info.preset) && state.slots[info.preset]) cards.unshift(slotCard(info.preset));
   $('slotCards').replaceChildren(...cards);
   updateControls();
 }
@@ -295,7 +383,7 @@ function slotCard(id) {
   const div = document.createElement('div');
   div.className = 'slot';
   const active = state.info?.preset === id;
-  div.innerHTML = `<h4><span>${esc(slotName(id))}${active ? ' <span class="chip">active</span>' : ''}</span><span class="muted small">${s ? 'read ' + new Date(s.readAt).toLocaleTimeString() : 'not read yet'}</span></h4>`;
+  div.innerHTML = `<h4><span>${esc(sname(id))}${active ? ' <span class="chip">active</span>' : ''}</span><span class="muted small">${s ? 'read ' + new Date(s.readAt).toLocaleTimeString() : 'not read yet'}</span></h4>`;
   if (s) {
     const lw = c0() ? store.lastWrite(deviceKey(), id) : null;
     if (lw) {
@@ -317,14 +405,14 @@ function slotCard(id) {
     row.append(
       btn(state.compare === id ? 'Hide on graph' : 'Show on graph', () => { state.compare = state.compare === id ? null : id; render(); renderDevice(); }),
       btn('Load into editor', () => loadFromDevice(id)),
-      btn('Download', () => store.download(`btr15-${slotName(id)}-${stamp()}.json`, JSON.stringify(store.makeBackup({ device: devDesc(), slot: id, slotName: slotName(id), live: s }), null, 2), 'application/json')),
+      btn('Download', () => store.download(`btr15-${sname(id)}-${stamp()}.json`, JSON.stringify(store.makeBackup({ device: devDesc(), slot: id, slotName: sname(id), live: s }), null, 2), 'application/json')),
     );
     div.append(row);
-  } else if (BTR15.userSlots.includes(id)) {
+  } else if (prof().userSlots.includes(id)) {
     const row = document.createElement('div');
     row.className = 'row';
     const b = btn('Read', () => readSlots([id]));
-    b.dataset.write = '';
+    if (state.conn?.btr.readsSlotsDirectly) b.dataset.read = ''; else b.dataset.write = '';
     row.append(b);
     div.append(row);
   }
@@ -334,33 +422,53 @@ function slotCard(id) {
 function c0() { return !!state.conn; }
 function deviceKey() {
   const c = state.conn;
-  return c ? `${c.sim ? 'sim' : 'usb'}:${hex4(c.device.vendorId)}:${hex4(c.device.productId)}` : 'none';
+  if (!c) return 'none';
+  if (c.transport === 'bluetooth') return `${c.sim ? 'simble' : 'ble'}:${c.device.id ?? devName(c.device)}`;
+  return `${c.sim ? 'sim' : 'usb'}:${hex4(c.device.vendorId)}:${hex4(c.device.productId)}`;
 }
 
 function logSlot(id, s) {
-  log.info(`${slotName(id)} (${id}): global gain ${fmtG(s.globalGain)} dB; ${s.bands.map((b) => `[${b.index}] ${fmtBand(b)}`).join('; ')}`);
+  log.info(`${sname(id)} (${id}): global gain ${fmtG(s.globalGain)} dB; ${s.bands.map((b) => `[${b.index}] ${fmtBand(b)}`).join('; ')}`);
   const lw = store.lastWrite(deviceKey(), id);
   if (lw) {
     const diff = compareValues(lw, s);
-    if (diff.length) log.warn(`${slotName(id)} DIFFERS from what this page saved on ${lw.at}: ${JSON.stringify(diff)}`);
-    else log.info(`${slotName(id)} matches what this page saved on ${lw.at}.`);
+    if (diff.length) log.warn(`${sname(id)} DIFFERS from what this page saved on ${lw.at}: ${JSON.stringify(diff)}`);
+    else log.info(`${sname(id)} matches what this page saved on ${lw.at}.`);
   }
 }
 
 $('btnReadLive').onclick = () => busy('Reading active preset', async () => {
   const live = await state.conn.btr.readLive();
   state.info.preset = live.preset;
+  if (live.builtIn) {
+    log.info(`The active preset is ${sname(live.preset)}, a built-in one; its bands are not readable over Bluetooth.`);
+    renderDevice();
+    return;
+  }
   state.info.globalGain = live.globalGain;
   state.slots[live.preset] = { globalGain: live.globalGain, bands: live.bands, readAt: Date.now() };
   logSlot(live.preset, state.slots[live.preset]);
   renderDevice(); render();
 });
 
-$('btnReadSlots').onclick = () => readSlots(BTR15.userSlots);
+$('btnReadSlots').onclick = () => readSlots(prof().userSlots);
 
 async function readSlots(ids) {
+  if (state.conn?.btr.readsSlotsDirectly) {
+    // Over Bluetooth user presets are read by index: read commands only, no switching.
+    await busy('Reading user presets', async () => {
+      for (const id of ids) {
+        const live = await state.conn.btr.readSlot(id);
+        state.slots[id] = { globalGain: live.globalGain, bands: live.bands, readAt: Date.now() };
+        logSlot(id, state.slots[id]);
+        renderDevice();
+      }
+    });
+    renderDevice(); render();
+    return;
+  }
   if (!canWrite()) return;
-  if (!await confirmOnce('switch', 'Read user slots', `<p>Reading a slot means switching the BTR15 to it (a SET command; stored contents are not changed). The page switches back to <b>${esc(slotName(state.info?.preset ?? 7))}</b> afterwards.</p><p>FiiO users report audio can stop briefly when presets switch.</p>`)) return;
+  if (!await confirmOnce('switch', 'Read user slots', `<p>Reading a slot means switching the BTR15 to it (a SET command; stored contents are not changed). The page switches back to <b>${esc(sname(state.info?.preset ?? 7))}</b> afterwards.</p><p>FiiO users report audio can stop briefly when presets switch.</p>`)) return;
   await busy('Reading user slots', async () => {
     const btr = state.conn.btr;
     const original = await btr.readPreset();
@@ -381,18 +489,22 @@ async function readSlots(ids) {
 
 $('btnSwitch').onclick = () => busy('Switching preset', async () => {
   const id = Number($('selPreset').value);
-  if (!await confirmOnce('switch', 'Switch preset', `<p>Switch the BTR15 to <b>${esc(slotName(id))}</b>? This changes which preset plays; no stored preset is changed.</p>`)) return;
+  if (!await confirmOnce('switch', 'Switch preset', `<p>Switch the BTR15 to <b>${esc(sname(id))}</b>? This changes which preset plays; no stored preset is changed.</p>`)) return;
   await state.conn.btr.switchPreset(id);
   state.info.preset = id;
   const live = await state.conn.btr.readLive();
-  state.slots[id] = { globalGain: live.globalGain, bands: live.bands, readAt: Date.now() };
-  logSlot(id, state.slots[id]);
+  if (!live.builtIn) {
+    state.slots[id] = { globalGain: live.globalGain, bands: live.bands, readAt: Date.now() };
+    logSlot(id, state.slots[id]);
+  }
   renderDevice(); render();
 });
 
 $('btnEqSwitch').onclick = () => busy('Changing EQ switch', async () => {
   const on = !state.info.eqSwitch;
-  if (!await confirmDlg(`Turn EQ ${on ? 'on' : 'off'}?`, '<p>FiiO says the BTR15 re-connects over USB when its EQ is toggled, so audio may stop for a moment and this page will reconnect. One Windows user lost audio with EQ on in UAC 2.0 mode; switching to UAC 1.0 on the device was the workaround reported.</p>')) return;
+  if (!await confirmDlg(`Turn EQ ${on ? 'on' : 'off'}?`, state.conn.transport === 'bluetooth'
+    ? '<p>Turns the BTR15\'s EQ on or off, as the switch in FiiO Control does. FiiO says the BTR15 re-connects over USB when its EQ is toggled, so USB audio may stop for a moment.</p>'
+    : '<p>FiiO says the BTR15 re-connects over USB when its EQ is toggled, so audio may stop for a moment and this page will reconnect. One Windows user lost audio with EQ on in UAC 2.0 mode; switching to UAC 1.0 on the device was the workaround reported.</p>')) return;
   await state.conn.btr.setEqSwitch(on);
   await sleep(1500);
   if (!state.conn.link.closed) state.info.eqSwitch = await state.conn.btr.readEqSwitch();
@@ -405,7 +517,7 @@ function loadFromDevice(id) {
   state.filters = s.bands.filter((b) => Math.abs(b.gain) >= 0.05 && ['PK', 'LS', 'HS'].includes(b.type))
     .map((b) => model.toRealised({ type: b.type, freq: b.freq, gain: b.gain, q: b.q, enabled: true }));
   state.globalGain = s.globalGain;
-  log.info(`Loaded ${slotName(id)} into the editor (Q shown as realised under the "${state.model}" model).`);
+  log.info(`Loaded ${sname(id)} into the editor (Q shown as realised under the "${state.model}" model).`);
   render();
 }
 
@@ -429,9 +541,9 @@ function loadText(text, name = 'pasted text') {
     // The file's own response becomes the target, so you can compare, or re-fit it for the device.
     const db = responseDb(r.filters, grid, r.preamp ?? 0);
     state.target = { name, source: `${r.source} (its own response)`, points: Array.from(grid.f, (f, i) => [f, db[i]]) };
-    const tooMany = r.filters.length > BTR15.expectedBands;
+    const tooMany = r.filters.length > prof().expectedBands;
     $('srcInfo').innerHTML = `<b>${esc(name)}</b>: ${esc(r.source)}, ${r.filters.length} filters, preamp ${fmtG(r.preamp ?? 0)} dB.` +
-      (tooMany ? ` That is more than the BTR15's ${BTR15.expectedBands} bands: press <b>Fit filters to curve</b> to re-fit it.` : ' Loaded as entered; you can also re-fit it.');
+      (tooMany ? ` That is more than the BTR15's ${prof().expectedBands} bands: press <b>Fit filters to curve</b> to re-fit it.` : ' Loaded as entered; you can also re-fit it.');
     log.info(`Loaded ${r.filters.length} filters from ${name}.`);
   }
   $('srcWarnings').replaceChildren(...r.warnings.map((w) => li(w)));
@@ -511,7 +623,7 @@ $('btnFit').onclick = async () => {
   try {
     const t0 = performance.now();
     const r = fitPeq(state.target.points, {
-      bands: clampInt($('optBands').value, 1, state.info?.bandCount ?? BTR15.expectedBands),
+      bands: clampInt($('optBands').value, 1, state.info?.bandCount ?? prof().expectedBands),
       types: $('optTypes').value.split(','),
       trebleWeight: Number($('optTreble').value),
       chainHeadroom: $('optChain').checked,
@@ -572,7 +684,7 @@ function renderTable() {
     return tr;
   }));
   $('globalGain').value = round(state.globalGain, 1);
-  $('btnAddFilter').disabled = state.filters.length >= (state.info?.bandCount ?? BTR15.expectedBands);
+  $('btnAddFilter').disabled = state.filters.length >= (state.info?.bandCount ?? prof().expectedBands);
 }
 
 $('globalGain').addEventListener('input', () => {
@@ -612,7 +724,7 @@ function renderGraph() {
   const cmp = state.compare != null ? state.slots[state.compare] : null;
   if (cmp) {
     stored = realisedResponse(cmp.bands.filter((b) => ['PK', 'LS', 'HS'].includes(b.type)), cmp.globalGain);
-    series.push({ id: 'stored', label: `On device: ${slotName(state.compare)}`, freqs: grid.f, db: stored, cls: 'stored' });
+    series.push({ id: 'stored', label: `On device: ${sname(state.compare)}`, freqs: grid.f, db: stored, cls: 'stored' });
   }
   if (target) {
     if (state.filters.length) series.push({ id: 'err', label: 'Error', freqs: grid.f, db: fit.map((v, i) => v - target[i]), cls: 'err', error: true });
@@ -637,7 +749,7 @@ function renderGraph() {
   }
   if (peak > 0.05) warns.push(`The EQ boosts up to ${fmtG(peak)} dB overall, which can clip on loud music. Lower the global gain by at least ${peak.toFixed(1)} dB.`);
   else if (chainPeak > 0.5) warns.push(`The filters boost ${fmtG(chainPeak)} dB before the global gain is counted. If the BTR15 applies its global gain after the filters, loud passages could clip. Re-fit with "Keep the filters themselves at or below 0 dB" to be safe.`);
-  const n = state.info?.bandCount ?? BTR15.expectedBands;
+  const n = state.info?.bandCount ?? prof().expectedBands;
   if (state.filters.length > n) warns.push(`${state.filters.length} filters, but the BTR15 has ${n} bands. Fit to the curve to reduce them.`);
   if (state.filters.some((f) => sentFor(f).clamped)) warns.push('Some values are outside what the BTR15 accepts (±12 dB, Q 0.25–8, 20 Hz–20 kHz) and will be clamped (marked ⚠).');
   if (Math.abs(state.globalGain) > 12) warns.push('Global gain is limited to ±12 dB on the BTR15.');
@@ -668,11 +780,11 @@ $('btnSave').onclick = async () => {
   if (!n) { await alertDlg('Band count unknown', '<p>Read the device first.</p>'); return; }
   let bands;
   try {
-    bands = toDeviceBands(state.filters.map((f) => sentFor(f).sent), n);
+    bands = toDeviceBands(state.filters.map((f) => sentFor(f).sent), n, prof());
   } catch (e) { await alertDlg('Cannot save', `<p>${esc(e.message)}</p>`); return; }
   const globalGain = Math.max(-12, Math.min(12, round(state.globalGain, 1)));
   const rows = bands.map((b) => `<tr><td>${b.index + 1}</td><td>${esc(fmtBand(b))}</td></tr>`).join('');
-  const ok = await confirmDlg(`Write ${slotName(slot)}?`, `
+  const ok = await confirmDlg(`Write ${sname(slot)}?`, `
     ${state.wroteOnce ? '' : '<p><b>This is the first write in this session.</b> The page will switch the BTR15 to the slot, read and back up its contents, then write the values below and save them into that slot. Nothing else is changed. If anything does not read back as written, it stops and shows a diff.</p>'}
     <p>Model: <b>${esc(state.model)}</b>. Global gain <b>${fmtG(globalGain)} dB</b>.</p>
     <table class="diff"><tr><th>Band</th><th>Sent to BTR15</th></tr>${rows}</table>`);
@@ -697,9 +809,9 @@ async function doWriteSlot(slot, values, verifyStored, label) {
       verifyStored,
       onStep,
       onBackup: (live) => {
-        const b = store.makeBackup({ device: devDesc(), slot, slotName: slotName(slot), live });
+        const b = store.makeBackup({ device: devDesc(), slot, slotName: sname(slot), live });
         const { ok } = store.addBackup(b);
-        log.info(`BACKUP of ${slotName(slot)} before writing: ${JSON.stringify(b)}`);
+        log.info(`BACKUP of ${sname(slot)} before writing: ${JSON.stringify(b)}`);
         if (!ok) log.warn('Browser storage is unavailable, so the backup is only in this log. Copy the log to keep it.');
         renderBackups();
       },
@@ -717,13 +829,13 @@ async function doWriteSlot(slot, values, verifyStored, label) {
   state.compare = slot;
   const out = $('saveResult');
   if (result.ok) {
-    out.innerHTML = `<p class="result-ok">Saved into ${esc(slotName(slot))}${verifyStored ? ' and verified: the stored slot reads back exactly as written' : ' (live values verified; stored slot not re-checked)'}.</p>`;
-    log.info(`Write to ${slotName(slot)} OK.`);
+    out.innerHTML = `<p class="result-ok">Saved into ${esc(sname(slot))}${verifyStored ? ' and verified: the stored slot reads back exactly as written' : ' (live values verified; stored slot not re-checked)'}.</p>`;
+    log.info(`Write to ${sname(slot)} OK.`);
   } else {
     onStepFail(stepsEl);
     out.innerHTML = `<p class="result-bad">${result.stage === 'stored' ? 'Saved, but the stored slot does not match what was written:' : 'The device did not accept these values:'}</p>` + diffTable(result.problems) +
       '<p class="small">Copy the log and paste it into the chat. Your previous contents are in Backups.</p>';
-    log.error(`Write to ${slotName(slot)} FAILED at stage "${result.stage}": ${JSON.stringify(result.problems)}`);
+    log.error(`Write to ${sname(slot)} FAILED at stage "${result.stage}": ${JSON.stringify(result.problems)}`);
   }
   renderDevice(); render();
   return result;
@@ -781,8 +893,8 @@ async function offerRestore(b) {
   if (!canWrite()) { await alertDlg('Writing is off', '<p>Connect the BTR15 and tick "Allow writing to the device" to restore a backup.</p>'); return; }
   const n = state.conn.btr.bandCount ?? state.info?.bandCount;
   if (b.bands.length !== n) { await alertDlg('Band count differs', `<p>The backup has ${b.bands.length} bands; the device has ${n}.</p>`); return; }
-  const slot = BTR15.userSlots.includes(b.slot) ? b.slot : Number($('saveSlot').value);
-  if (!await confirmDlg(`Restore ${slotName(slot)}?`, `<p>Writes the backup from ${esc(new Date(b.takenAt).toLocaleString())} into <b>${esc(slotName(slot))}</b> exactly as stored (raw device values, no model conversion). The current contents are backed up first.</p>`)) return;
+  const slot = prof().userSlots.includes(b.slot) ? b.slot : Number($('saveSlot').value);
+  if (!await confirmDlg(`Restore ${sname(slot)}?`, `<p>Writes the backup from ${esc(new Date(b.takenAt).toLocaleString())} into <b>${esc(sname(slot))}</b> exactly as stored (raw device values, no model conversion). The current contents are backed up first.</p>`)) return;
   await doWriteSlot(slot, { globalGain: b.globalGain, bands: b.bands.map((x) => ({ ...x })) }, true, 'Restoring');
 }
 
@@ -797,19 +909,19 @@ $('btnLsStart').onclick = async () => {
   const test = LISTEN_TESTS[$('lsTest').value];
   const slot = Number($('lsSlot').value);
   const ok = await confirmDlg('Start the listening check?', `
-    <p>The page will switch the BTR15 to <b>${esc(slotName(slot))}</b>, back it up, and set it <b>live, without saving</b> to a single ${esc(fmtBand(test.device))} band with the other bands flat and global gain 0 dB. When you finish, the backed-up values are written back (still without saving).</p>
+    <p>The page will switch the BTR15 to <b>${esc(sname(slot))}</b>, back it up, and set it <b>live, without saving</b> to a single ${esc(fmtBand(test.device))} band with the other bands flat and global gain 0 dB. When you finish, the backed-up values are written back (still without saving).</p>
     <p><b>Turn the volume down first.</b> Make the BTR15 the Windows output device.</p>`);
   if (!ok) return;
   const started = await busy('Preparing listening check', async () => {
     const btr = state.conn.btr;
     if ((await btr.readPreset()) !== slot) await btr.switchPreset(slot);
     const live = await btr.readLive();
-    const b = store.makeBackup({ device: devDesc(), slot, slotName: slotName(slot), live });
+    const b = store.makeBackup({ device: devDesc(), slot, slotName: sname(slot), live });
     store.addBackup(b);
-    log.info(`BACKUP of ${slotName(slot)} before the listening check: ${JSON.stringify(b)}`);
+    log.info(`BACKUP of ${sname(slot)} before the listening check: ${JSON.stringify(b)}`);
     renderBackups();
     const n = live.bands.length;
-    const bands = toDeviceBands([{ ...test.device, enabled: true }], n);
+    const bands = toDeviceBands([{ ...test.device, enabled: true }], n, prof());
     const problems = await btr.writeLiveVerified({ globalGain: 0, bands });
     if (problems.length) throw new Error(`The test band did not read back as written: ${JSON.stringify(problems)}`);
     Object.assign(ls, { active: true, test, slot, backup: live, rounds: [], deviceGain: test.device.gain });
@@ -918,7 +1030,7 @@ async function lsStop() {
     if ((await btr.readPreset()) !== slot) await btr.switchPreset(slot);
     const problems = await btr.writeLiveVerified({ globalGain: backup.globalGain, bands: backup.bands });
     if (problems.length) throw new Error(`Some bands did not restore: ${JSON.stringify(problems)}. The backup is in Backups.`);
-    log.info(`Restored ${slotName(slot)} to its backed-up values (live). Nothing was saved during the check.`);
+    log.info(`Restored ${sname(slot)} to its backed-up values (live). Nothing was saved during the check.`);
   });
   updateControls();
 }
@@ -928,7 +1040,7 @@ function lsAbort(reason) {
   ls.active = false;
   $('lsPanel').hidden = true;
   $('btnLsStop').hidden = true;
-  log.warn(`${reason} Reconnect, then restore ${slotName(ls.slot)} from Backups if it still has the test band.`);
+  log.warn(`${reason} Reconnect, then restore ${sname(ls.slot)} from Backups if it still has the test band.`);
 }
 
 // ── Persistence ─────────────────────────────────────────────────────────────
@@ -1001,7 +1113,18 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function flash(el, text) { const t = el.textContent; el.textContent = text; setTimeout(() => { el.textContent = t; }, 1200); }
 function devDesc() {
   const c = state.conn;
-  return c ? { productName: c.device.productName, vendorId: c.device.vendorId, productId: c.device.productId, firmware: state.info?.firmware ?? null, simulated: !!c.sim } : null;
+  if (!c) return null;
+  return c.transport === 'bluetooth'
+    ? { productName: devName(c.device), transport: 'bluetooth', bluetoothId: c.device.id ?? null, firmware: c.btr.firmware ?? null, simulated: !!c.sim }
+    : { productName: devName(c.device), transport: 'usb', vendorId: c.device.vendorId, productId: c.device.productId, firmware: state.info?.firmware ?? null, simulated: !!c.sim };
+}
+
+// Fill a <select> with the active profile's user presets, keeping the choice if possible.
+function fillSlotSelect(sel, defaultIndex = 0) {
+  const ids = prof().userSlots;
+  const keep = Number(sel.value);
+  sel.replaceChildren(...ids.map((id) => new Option(sname(id), id)));
+  sel.value = String(ids.includes(keep) ? keep : ids[Math.min(defaultIndex, ids.length - 1)]);
 }
 
 const FT1_FALLBACK = 'GraphicEQ: 20 -8.3; 21 -8.2; 22 -8.1; 23 -8; 24 -8; 26 -7.8; 27 -7.8; 29 -7.6; 30 -7.6; 32 -7.4; 34 -7.3; 36 -7.2; 38 -7.1; 40 -7; 43 -6.9; 45 -6.8; 48 -6.7; 50 -6.6; 53 -6.4; 56 -6.2; 59 -6.1; 63 -6; 66 -6.1; 70 -6.1; 74 -6.3; 78 -6.4; 83 -6.7; 87 -6.8; 92 -7.1; 97 -7.3; 103 -7.6; 109 -7.8; 115 -7.9; 121 -8; 128 -8; 136 -8; 143 -7.9; 151 -7.8; 160 -7.7; 169 -7.5; 178 -7.3; 188 -7.1; 199 -6.9; 210 -6.8; 222 -6.6; 235 -6.3; 248 -6.1; 262 -5.8; 277 -5.5; 292 -5.2; 309 -4.9; 326 -4.7; 345 -4.5; 364 -4.3; 385 -4.2; 406 -4.1; 429 -4.1; 453 -4; 479 -4; 506 -4; 534 -4; 565 -4.1; 596 -4.2; 630 -4.3; 665 -4; 703 -3.5; 743 -3.5; 784 -3.6; 829 -3.8; 875 -4; 924 -4.3; 977 -4.6; 1032 -4.9; 1090 -5; 1151 -5; 1216 -5; 1284 -4.9; 1357 -4.8; 1433 -4.9; 1514 -5.3; 1599 -5.6; 1689 -5.9; 1784 -6; 1885 -6; 1991 -5.5; 2103 -4.7; 2221 -4.1; 2347 -3.9; 2479 -4.1; 2618 -4.2; 2766 -4.2; 2921 -3.8; 3086 -3.1; 3260 -2; 3443 -1; 3637 -0.3; 3842 -0.2; 4058 -0.8; 4287 -1.8; 4528 -3.1; 4783 -5.2; 5052 -7.6; 5337 -8; 5637 -6.6; 5955 -5.1; 6290 -3.7; 6644 -2.3; 7018 -0.8; 7414 -0.2; 7831 -0.5; 8272 -0.6; 8738 -0.9; 9230 -1.4; 9749 -2; 10298 -2.5; 10878 -2.9; 11490 -3.5; 12137 -4.1; 12821 -4.8; 13543 -5.6; 14305 -6.5; 15110 -7.5; 15961 -8.5; 16860 -9.7; 17809 -10.9; 18812 -12.2; 19871 -13.6';
@@ -1009,11 +1132,13 @@ const FT1_FALLBACK = 'GraphicEQ: 20 -8.3; 21 -8.2; 22 -8.1; 23 -8; 24 -8; 26 -7.
 // ── Start ───────────────────────────────────────────────────────────────────
 $('version').textContent = `v${APP_VERSION}`;
 restore();
+fillSlotSelect($('saveSlot'), 2);
+fillSlotSelect($('lsSlot'), 2);
 syncModelRadios();
 render();
 renderDevice();
 renderBackups();
 updateControls();
-log.info(`BTR15 PEQ Writer ${APP_VERSION} loaded. WebHID ${'hid' in navigator ? 'available' : 'NOT available'}.`);
+log.info(`BTR15 PEQ Writer ${APP_VERSION} loaded. Web Bluetooth ${'bluetooth' in navigator ? 'available' : 'NOT available'}; WebHID ${'hid' in navigator ? 'available' : 'NOT available'}.`);
 // For automated tests only.
 window.__btr15 = { state, log };

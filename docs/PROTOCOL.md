@@ -1,10 +1,48 @@
-# FiiO BTR15 USB-HID protocol notes
+# FiiO BTR15 control protocol notes
 
-What this app relies on, where each fact came from, and how sure it is. "Verified"
-means checked on a real BTR15; nothing is yet. Everything below comes from reading
-code, and the hardware tests in [TESTING.md](TESTING.md) are there to confirm it.
+What this app relies on, where each fact came from, and how sure it is. "Observed"
+means seen on a real BTR15; everything else comes from reading code, and the
+hardware tests in [TESTING.md](TESTING.md) are there to confirm it.
 
-## Sources
+**Summary.** The app controls the BTR15 over **Bluetooth (GAIA over BLE)**, the way
+FiiO Control for Android does. The USB-HID notes further down are kept for
+reference: on a real BTR15 (firmware 4.4) the USB control interface answered
+nothing, and FiiO's own web page cannot use it either.
+
+## Bluetooth (primary)
+
+Source: FiiO Control for Android, decompiled with jadx for study (2026-11-19). No
+FiiO code is copied.
+
+### Transport
+
+* Qualcomm GAIA over BLE GATT. Service `00001100-d102-11e1-9b23-00025b00a5a5`. Commands are written with response to `00001101-…`; replies arrive as notifications on `00001102-…`.
+* Request: `00 0A 04 HH LL [data]`. FiiO's 16-bit command `0xHHLL` rides as GAIA command `0x04HH`, with `LL` as the first payload byte.
+* Reply: `00 0A 84 HH ST LL [data]`, where `ST` is the status (`00` = success). The app takes the command from bytes 3 and 5 and the data from byte 6 on.
+* Writes are the read command + `0x1000`. The BTR15 acknowledges each write with a reply carrying the same command, and FiiO's app then reads the value again.
+
+### BTR15 commands (FiiO Control's device type 24)
+
+| Read | Write | Data | Notes |
+| --- | --- | --- | --- |
+| `0x0002` | – | reply `[major, minor]` | firmware version |
+| `0x0003` | – | reply `[percent]` | battery |
+| `0x0301` | `0x1301` | `[0/1]` | EQ on/off |
+| `0x0302` | `0x1302` | read `[index, band]`; reply/write `[index, band, gain16 ×10, freq16, Q16 ×100, type]` | `type` only on firmware ≥ 2.5 |
+| `0x0304` | `0x1304` | `[preset id]` | active preset |
+| `0x0308` | `0x1308` | read `[index]`; reply/write `[index, gain16 ×10]` | global gain of a user preset, ±12 dB |
+| `0x030B` | `0x130B` | `[index, characters…]` | user preset names (this app does not write them) |
+| – | `0x1309` | `[index + 1]` | FiiO's "reset preset" button; **never sent** by this app |
+
+* Preset IDs: 0 Jazz, 1 Pop, 2 Rock, 3 Dance, **4 USER1**, 5 R&B, 6 Classical, 7 Hip-hop, **8 USER2**, **9 USER3**. These differ from the USB numbering (7, 8, 9).
+* `index` is the user-preset index: 0 = USER1, 1 = USER2, 2 = USER3. So any user preset can be read without switching to it. FiiO's app only writes the active one, and so does this app.
+* 10 bands; filter types peak, low shelf, high shelf.
+* There is no separate save command: FiiO's app writes bands straight into the preset.
+* Firmware below 2.5 is sent no type byte, so every band is a peak there. The tested BTR15 reports 4.4.
+
+## USB HID (reference; not working on the BTR15)
+
+### Sources
 
 | Source | What it gave | Retrieved |
 | --- | --- | --- |
@@ -15,7 +53,7 @@ code, and the hardware tests in [TESTING.md](TESTING.md) are there to confirm it
 No FiiO code is copied here. The FiiO Control Android app was not needed, because the
 web app already has the BTR15 tables.
 
-## Transport
+### Transport
 
 * USB vendor ID `0x2972`. FiiO's app identifies the model from the HID product name; the BTR15's is `FIIO BTR15`.
 * HID **output report 7** (FiiO uses 7 for every model not listed otherwise; only the KA17 (1) and JA11 (2) differ). Reports are zero-padded to the length in the HID descriptor.
@@ -31,7 +69,7 @@ web app already has the BTR15 tables.
 * `sendReport(7, …)`, which is what FiiO's web app would do for a product name containing "FIIO BTR15", is **refused by Chrome** ("Failed to write the report"), because the interface has no report IDs.
 * So FiiO's web app cannot drive this interface as it enumerates here. Its BTR15 code probably targets a firmware or USB mode that exposes report 7. The FiiO Control Android app does work with this BTR15 over USB, so its code is the next source.
 
-## Frame
+### Frame
 
 ```
 [h1 h2] [seq_hi seq_lo] [cmd] [len] [payload … len bytes] [crc8] [EE]
@@ -45,7 +83,7 @@ web app already has the BTR15 tables.
 
 This app sends the current format (incrementing seq, real CRC), logs whether replies echo the sequence number, and, once they do, matches replies by it.
 
-## Commands this app sends
+### Commands this app sends
 
 | Cmd | Name (FiiO's) | GET payload → reply payload | SET payload |
 | --- | --- | --- | --- |
@@ -68,7 +106,7 @@ Anything not in the table above throws before it is sent. Notably:
 * `18` SET (set band count). devicePEQ sends it before writing; FiiO's web app never does.
 * `30` preset names (FiiO's app does not support custom names on the BTR15) and the `60`/`61` "PEQ V2" commands (used by FiiO for the KG13, not the BTR15).
 
-## BTR15 specifics (from FiiO's web app tables)
+### BTR15 specifics (from FiiO's web app tables)
 
 | Item | Value |
 | --- | --- |

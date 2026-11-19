@@ -1,4 +1,4 @@
-// End-to-end smoke test against the in-page simulated BTR15.
+// End-to-end smoke test against the in-page simulated BTR15 (Bluetooth).
 // Usage: node tests/e2e/smoke.mjs [baseUrl] [screenshotDir]
 import { createRequire } from 'node:module';
 const { chromium } = createRequire(import.meta.url)('playwright');
@@ -33,9 +33,8 @@ await page.waitForSelector('#saveResult p', { timeout: 20000 });
 console.log('save:', (await page.textContent('#saveResult')).trim());
 if (shots) await page.screenshot({ path: `${shots}/after-save.png`, fullPage: true });
 
-// Read all user slots.
+// Read all user presets (over Bluetooth this needs no switching and no dialog).
 await page.click('#btnReadSlots');
-await okDialog();
 await page.waitForFunction(() => document.querySelectorAll('.slot table').length >= 3, null, { timeout: 20000 });
 console.log('slots read:', await page.locator('.slot table').count());
 
