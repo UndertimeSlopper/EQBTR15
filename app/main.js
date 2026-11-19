@@ -359,10 +359,10 @@ async function identify(auto = false) {
           <ol>
             <li>Close FiiO Control on the phone.</li>
             <li>In Windows <b>Settings → Bluetooth &amp; devices</b>, remove the BTR15 (<b>⋯ → Remove device</b>), so no half-finished pairing is left.</li>
-            <li>Put the BTR15 in pairing mode: on FiiO BTR models usually, with it switched off, hold the power button until the light flashes red and blue. Check the BTR15 manual if yours differs.</li>
+            <li>Put the BTR15 in pairing mode, so its screen shows <b>PAIRING</b>.</li>
             <li>Here, press <b>Disconnect</b> if shown, then <b>Connect BTR15</b>, and pick it. The browser will try to pair over LE when the page sends its first command: <b>accept any pairing prompt</b> from Windows or the browser.</li>
           </ol>
-          <p class="small">Once paired over LE, later connections should not need pairing mode. You can pair it again in Windows for audio afterwards if you want.</p>`);
+          <p class="small">If the BTR15 started sending messages (lines "pushed by device" in the log) but commands still failed, the pairing probably finished: <b>reload the page</b> and connect again without pairing mode. Once paired over LE, later connections should not need pairing mode.</p>`);
         return;
       }
       await alertDlg('The BTR15 did not answer', state.conn.link.transport === 'bluetooth-serial'

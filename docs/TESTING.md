@@ -12,7 +12,7 @@ The BTR15 takes commands only over an encrypted Bluetooth LE link, so the first
 connection has to pair over LE:
 
 1. In Windows **Settings → Bluetooth & devices**, remove the BTR15 if it is listed (**⋯ → Remove device**).
-2. Put the BTR15 in pairing mode. On FiiO BTR models this is usually: with it switched off, hold the power button until the light flashes red and blue.
+2. Put the BTR15 in pairing mode, so its screen shows **PAIRING**.
 3. Open the page, press **Connect BTR15** and pick **FIIO BTR15** in the Bluetooth list. Leave **Allow writing to the device** unticked.
 4. When the page sends its first command, the browser tries to pair. **Accept any pairing prompt** from Windows or the browser. The page waits a few seconds for it.
 5. Check the Device panel: firmware (should be 4.4), EQ switch, active preset, and the bands of the active preset if it is a user preset.

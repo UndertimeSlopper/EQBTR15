@@ -136,3 +136,31 @@ test('waits through "in progress" while a pairing completes', async () => {
   assert.match(log.toText(), /pairing is in progress/);
   await link.close();
 });
+
+test('reconnects from scratch when "in progress" never clears on the first connection', async () => {
+  const dev = new SimulatedBtr15Ble();
+  const real = dev.cmdChar.writeValueWithResponse;
+  let connects = 0;
+  const origConnect = dev.gatt.connect;
+  dev.gatt.connect = async () => { connects++; return origConnect(); };
+  dev.cmdChar.writeValueWithResponse = async (b) => {
+    if (connects < 2) throw new DOMException('Connection already in progress.', 'NetworkError');
+    return real(b);
+  };
+  const log = new TrafficLog();
+  const link = new BleLink(dev, { log, timeoutMs: 200, profile: fast });
+  await link.open();
+  const info = await new Btr15Bt(link, { profile: fast, log }).identify();
+  assert.deepEqual(info.firmware, [4, 4], log.toText());
+  assert.match(log.toText(), /Reconnecting from scratch/);
+  await link.close();
+});
+
+test('repeated pushed values are summarised, not logged one by one', async () => {
+  const { link, log, dev } = await connect();
+  for (let i = 0; i < 5; i++) dev._reply(0x0209, 0, [0x3B + (i % 2)]);
+  await new Promise((r) => setTimeout(r, 60));
+  const lines = log.toText().split('\n').filter((l) => /0x0209|cmd 0x0209/.test(l));
+  assert.equal(lines.length, 1, log.toText());
+  await link.close();
+});

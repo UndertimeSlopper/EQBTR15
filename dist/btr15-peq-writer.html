@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BTR15 PEQ Writer</title>
-<!-- single-file build of 764ee69 -->
+<!-- single-file build of c16b40e -->
 <meta name="description" content="Write, read back and verify parametric EQ presets on a FiiO BTR15 over USB (WebHID), with auto-EQ fitting of AutoEQ files.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23256f6a'/%3E%3Cpath d='M4 20 C9 20 9 9 14 9 S19 23 24 23 S27 16 28 16' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
@@ -2393,12 +2393,14 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
       this.respChar = await service.getCharacteristic(GAIA_RESPONSE);
       const p = this.cmdChar.properties ?? {};
       this.withResponse = !!p.write || !p.writeWithoutResponse;
+      this.respChar.removeEventListener?.("characteristicvaluechanged", this._onNotify);
       this.respChar.addEventListener("characteristicvaluechanged", this._onNotify);
       await this.respChar.startNotifications();
       this.log?.info(`Connected. GAIA command characteristic: ${p.write ? "write" : ""}${p.writeWithoutResponse ? " write-without-response" : ""}; replies by notification.`);
     }
     async close() {
       this.closed = true;
+      clearTimeout(this._pushTimer);
       this._failAll(new LinkError("Connection closed", "closed"));
       try {
         this.respChar?.removeEventListener("characteristicvaluechanged", this._onNotify);
@@ -2456,7 +2458,27 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         return;
       }
       this.stats.unsolicited++;
-      this.log?.rx(`(unsolicited) ${this._describe(f)}`, data);
+      this._pushed ??= /* @__PURE__ */ new Map();
+      const key = f.cmd;
+      const seen = this._pushed.get(key);
+      const val = Array.from(f.data ?? []).map((x) => x.toString(16).toUpperCase().padStart(2, "0")).join(" ");
+      if (!seen) {
+        this._pushed.set(key, { n: 0, vals: /* @__PURE__ */ new Set() });
+        this.log?.rx(`(pushed by device) ${this._describe(f)}; repeats are summarised`, data);
+      } else {
+        seen.n++;
+        seen.vals.add(val);
+        if (!this._pushTimer) {
+          this._pushTimer = setTimeout(() => {
+            this._pushTimer = null;
+            for (const [cmd, x] of this._pushed) {
+              if (x.n) this.log?.info(`Device pushed 0x${cmd.toString(16).padStart(4, "0")} ${x.n} more time(s); values: ${[...x.vals].slice(0, 8).join(", ")}`);
+              x.n = 0;
+              x.vals.clear();
+            }
+          }, 1e4);
+        }
+      }
       for (const fn of this.unsolicited) {
         try {
           fn(f);
@@ -2482,7 +2504,8 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
         await this._rawWrite(bytes);
       } catch (e0) {
         let e = e0;
-        for (let i = 0; i < 8 && /in progress/i.test(`${e.message ?? e}`); i++) {
+        const inProgress = (x) => /in progress/i.test(`${x.message ?? x}`);
+        for (let i = 0; i < 4 && inProgress(e); i++) {
           if (i === 0) this.log?.warn("Bluetooth says a connection or pairing is in progress; waiting for it (accept any pairing prompt from Windows or the browser)\u2026");
           await sleep(1500);
           try {
@@ -2490,6 +2513,35 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
             return;
           } catch (e2) {
             e = e2;
+          }
+        }
+        for (let round3 = 1; round3 <= 2 && inProgress(e); round3++) {
+          this.log?.warn(`Still "in progress". Reconnecting from scratch (${round3} of 2) and trying again\u2026`);
+          try {
+            this._reattaching = true;
+            try {
+              this.device.gatt.disconnect();
+            } catch {
+            }
+            await sleep(2500);
+            await this._attach();
+          } catch (ce) {
+            e = ce;
+            this.log?.warn(`Reconnect failed: ${ce.message}`);
+            continue;
+          } finally {
+            this._reattaching = false;
+          }
+          for (let i = 0; i < 4; i++) {
+            try {
+              await this._rawWrite(bytes);
+              this.log?.info("The command went through after reconnecting.");
+              return;
+            } catch (e2) {
+              e = e2;
+            }
+            if (!inProgress(e)) break;
+            await sleep(1500);
           }
         }
         const msg = `${e.message ?? e}`;
@@ -3666,10 +3718,10 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
           <ol>
             <li>Close FiiO Control on the phone.</li>
             <li>In Windows <b>Settings \u2192 Bluetooth &amp; devices</b>, remove the BTR15 (<b>\u22EF \u2192 Remove device</b>), so no half-finished pairing is left.</li>
-            <li>Put the BTR15 in pairing mode: on FiiO BTR models usually, with it switched off, hold the power button until the light flashes red and blue. Check the BTR15 manual if yours differs.</li>
+            <li>Put the BTR15 in pairing mode, so its screen shows <b>PAIRING</b>.</li>
             <li>Here, press <b>Disconnect</b> if shown, then <b>Connect BTR15</b>, and pick it. The browser will try to pair over LE when the page sends its first command: <b>accept any pairing prompt</b> from Windows or the browser.</li>
           </ol>
-          <p class="small">Once paired over LE, later connections should not need pairing mode. You can pair it again in Windows for audio afterwards if you want.</p>`);
+          <p class="small">If the BTR15 started sending messages (lines "pushed by device" in the log) but commands still failed, the pairing probably finished: <b>reload the page</b> and connect again without pairing mode. Once paired over LE, later connections should not need pairing mode.</p>`);
           return;
         }
         await alertDlg("The BTR15 did not answer", state.conn.link.transport === "bluetooth-serial" ? `<p>The serial port opened but nothing answered the version request. Nothing was written.</p><p>If you picked a "Standard Serial over Bluetooth link" port, disconnect and try the other one (the <b>outgoing</b> port). Otherwise press <b>Copy log</b> and paste it into the chat.</p>` : state.conn.transport === "bluetooth" ? `<p>The BTR15 accepted the Bluetooth connection but did not answer the version request. Nothing was written.</p><p>Please press <b>Copy log</b> and paste it into the chat. Closing FiiO Control on your phone may help.</p>` : `<p>The page asked for the band count in every encoding it knows and got no reply. Nothing was written.</p>

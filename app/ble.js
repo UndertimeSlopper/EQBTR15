@@ -51,6 +51,7 @@ export class BleLink {
     this.respChar = await service.getCharacteristic(GAIA_RESPONSE);
     const p = this.cmdChar.properties ?? {};
     this.withResponse = !!p.write || !p.writeWithoutResponse;
+    this.respChar.removeEventListener?.('characteristicvaluechanged', this._onNotify);
     this.respChar.addEventListener('characteristicvaluechanged', this._onNotify);
     await this.respChar.startNotifications();
     this.log?.info(`Connected. GAIA command characteristic: ${p.write ? 'write' : ''}${p.writeWithoutResponse ? ' write-without-response' : ''}; replies by notification.`);
@@ -58,6 +59,7 @@ export class BleLink {
 
   async close() {
     this.closed = true;
+    clearTimeout(this._pushTimer);
     this._failAll(new LinkError('Connection closed', 'closed'));
     try { this.respChar?.removeEventListener('characteristicvaluechanged', this._onNotify); } catch { /* ignore */ }
     this.device.removeEventListener('gattserverdisconnected', this._onGone);
@@ -106,7 +108,28 @@ export class BleLink {
       return;
     }
     this.stats.unsolicited++;
-    this.log?.rx(`(unsolicited) ${this._describe(f)}`, data);
+    // Devices push some values repeatedly (the BTR15 pushes 0x0209 every second
+    // or so); log the first of each and summarise the rest.
+    this._pushed ??= new Map();
+    const key = f.cmd;
+    const seen = this._pushed.get(key);
+    const val = Array.from(f.data ?? []).map((x) => x.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+    if (!seen) {
+      this._pushed.set(key, { n: 0, vals: new Set() });
+      this.log?.rx(`(pushed by device) ${this._describe(f)}; repeats are summarised`, data);
+    } else {
+      seen.n++;
+      seen.vals.add(val);
+      if (!this._pushTimer) {
+        this._pushTimer = setTimeout(() => {
+          this._pushTimer = null;
+          for (const [cmd, x] of this._pushed) {
+            if (x.n) this.log?.info(`Device pushed 0x${cmd.toString(16).padStart(4, '0')} ${x.n} more time(s); values: ${[...x.vals].slice(0, 8).join(', ')}`);
+            x.n = 0; x.vals.clear();
+          }
+        }, 10000);
+      }
+    }
     for (const fn of this.unsolicited) { try { fn(f); } catch { /* listener error */ } }
   }
 
@@ -130,14 +153,38 @@ export class BleLink {
       await this._rawWrite(bytes);
     } catch (e0) {
       let e = e0;
+      const inProgress = (x) => /in progress/i.test(`${x.message ?? x}`);
       // The GAIA command characteristic needs an encrypted (paired) LE link.
       // When it is missing, Chrome/Edge pair on demand; while that pairing is
       // pending (or waiting for you to confirm it) writes fail with "already
       // in progress". Wait for it rather than giving up at once.
-      for (let i = 0; i < 8 && /in progress/i.test(`${e.message ?? e}`); i++) {
+      for (let i = 0; i < 4 && inProgress(e); i++) {
         if (i === 0) this.log?.warn('Bluetooth says a connection or pairing is in progress; waiting for it (accept any pairing prompt from Windows or the browser)…');
         await sleep(1500);
         try { await this._rawWrite(bytes); return; } catch (e2) { e = e2; }
+      }
+      // Still stuck: the pairing may have finished underneath a connection the
+      // browser still considers busy. Drop the connection, make a fresh one
+      // (which uses the new pairing from the start) and try again.
+      for (let round = 1; round <= 2 && inProgress(e); round++) {
+        this.log?.warn(`Still "in progress". Reconnecting from scratch (${round} of 2) and trying again…`);
+        try {
+          this._reattaching = true;
+          try { this.device.gatt.disconnect(); } catch { /* ignore */ }
+          await sleep(2500);
+          await this._attach();
+        } catch (ce) {
+          e = ce;
+          this.log?.warn(`Reconnect failed: ${ce.message}`);
+          continue;
+        } finally {
+          this._reattaching = false;
+        }
+        for (let i = 0; i < 4; i++) {
+          try { await this._rawWrite(bytes); this.log?.info('The command went through after reconnecting.'); return; } catch (e2) { e = e2; }
+          if (!inProgress(e)) break;
+          await sleep(1500);
+        }
       }
       const msg = `${e.message ?? e}`;
       // The BTR15 refuses commands from a device it is not paired with.
